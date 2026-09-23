@@ -2,6 +2,8 @@
 //   dist/index.js   one ESM bundle of src/ (runtime dependencies stay external: they are declared in
 //                   package.json and installed next to the plugin, so `effect` is shared with
 //                   @opencode/codemode instead of being duplicated)
+//   dist/tui.js     the TUI companion (live progress tree), precompiled Solid JSX with every
+//                   host-provided module external (scripts/build-tui.ts)
 //   dist/*.d.ts     type declarations emitted by tsc from tsconfig.build.json
 //
 // The bundle targets Node-compatible ESM (node: builtins only, no Bun APIs), so it loads both in
@@ -14,6 +16,7 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import { buildTui } from "./build-tui.ts"
 
 const root = path.resolve(import.meta.dir, "..")
 const dist = path.join(root, "dist")
@@ -34,6 +37,14 @@ if (!result.success) {
   process.exit(1)
 }
 for (const output of result.outputs) console.log(`built ${path.relative(root, output.path)}`)
+
+try {
+  const tui = await buildTui(dist)
+  console.log(`built ${path.relative(root, tui)}`)
+} catch (e) {
+  console.error(e instanceof Error ? e.message : e)
+  process.exit(1)
+}
 
 const tsc = spawnSync("npx", ["tsc", "-p", "tsconfig.build.json"], {
   cwd: root,

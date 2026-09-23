@@ -47,6 +47,9 @@ export function sandboxEnv(extra: Record<string, string> = {}): Record<string, s
     XDG_CONFIG_HOME: join(SANDBOX, "e2e-config"),
     XDG_STATE_HOME: join(SANDBOX, "e2e-state"),
     XDG_CACHE_HOME: join(SANDBOX, "e2e-cache"),
+    // opencode loads every AGENTS.md from the project up to the home dir (under home) or the project root;
+    // with the home moved to .sandbox, this repo's own AGENTS.md never reaches the live models.
+    OPENCODE_TEST_HOME: SANDBOX,
     OPENCODE_PASSWORD: PASSWORD,
     ...extra,
   }

@@ -28,10 +28,18 @@
 //  - The run stays registered as active until every agent runner call has settled, even after
 //    stop(). isRunActive() lets the tool layer refuse a resume while old agents are still
 //    exiting (P43).
+//  - Steering (X01–X06, an extension): every live agent has an AgentMailbox, handed to the runner
+//    as AgentRequest.mailbox. message(target, msg) resolves the target (index, label, phase, all),
+//    posts to each agent's mailbox (running → sent at its next step boundary, queued → held for
+//    its first prompt, finished → refused) and journals each accepted message as a
+//    {type:"message"} line. A steered agent's result line gets steered:true, so resume never
+//    serves it from cache (and, by P41, runs every later agent live too). Messages are not replayed
+//    and never change an agent's key.
 
 import { availableParallelism, cpus } from "node:os"
 import { join } from "node:path"
 import { agentKey, type ReplayCursor } from "./journal.ts"
+import { AgentMailbox, type MessageFrom, type MessageVia } from "./mailbox.ts"
 import { buildProgram, executeProgram } from "./sandbox.ts"
 import { preflightSchema } from "./schema.ts"
 import { SCRIPT_FILE, type RunStore } from "./store.ts"
@@ -46,6 +54,8 @@ import {
   type Effort,
   type JournalEntry,
   type Json,
+  type MessageReport,
+  type MessageTarget,
   type PhaseSummary,
   type RunStatus,
   type RunSummary,
@@ -88,6 +98,8 @@ export interface StartRunOptions {
   /** Session directory key under the store root (usually the parent session id). */
   sessionKey: string
   parentSessionID?: string
+  /** The host's project directory (the opencode Location) that owns the run; recorded in run.json. */
+  directory?: string
   meta: WorkflowMeta
   body: string
   /** Exposed to the script as the global `args` (undefined when omitted). */
@@ -218,6 +230,18 @@ interface LiveAgent {
   record: AgentRecord
   controller: AbortController
   userStopped: boolean
+  /** Steering window (X01–X04); sealed when the agent settles. */
+  mailbox: AgentMailbox
+  /** Last message sequence number for this agent (message ids are wm_<index>_<n>). */
+  msgSeq: number
+}
+
+/** A steering message as given by the host (the engine assigns its id and time). */
+export interface MessageInput {
+  from: MessageFrom
+  via: MessageVia
+  text: string
+  urgent?: boolean
 }
 
 function errorMessage(e: unknown): string {
@@ -297,6 +321,8 @@ export class WorkflowRun {
   private readonly warnings: string[]
   private readonly logs: string[] = []
   private readonly phaseOrder: string[] = []
+  /** meta.phases[].model labels by phase title (X10, display only). */
+  private readonly phaseModels = new Map<string, string>()
   private readonly records: AgentRecord[] = []
   private readonly live = new Map<number, LiveAgent>()
   private nextIndex = 0
@@ -326,7 +352,10 @@ export class WorkflowRun {
     this.budgetTotal = typeof opts.budgetTotal === "number" && Number.isFinite(opts.budgetTotal) ? opts.budgetTotal : null
     this.throttleMs = opts.summaryThrottleMs ?? DEFAULT_SUMMARY_THROTTLE_MS
     this.warnings = [...(opts.warnings ?? [])]
-    for (const p of opts.meta.phases ?? []) this.addPhase(p.title)
+    for (const p of opts.meta.phases ?? []) {
+      this.addPhase(p.title)
+      if (typeof p.model === "string" && p.model.trim() && !this.phaseModels.has(p.title)) this.phaseModels.set(p.title, p.model.trim())
+    }
     this.resultPromise = new Promise((r) => (this.resolveResult = r))
   }
 
@@ -375,7 +404,7 @@ export class WorkflowRun {
 
   /** Current RunSummary snapshot. */
   summary(): RunSummary {
-    type Group = PhaseSummary & { from?: number; to?: number }
+    type Group = PhaseSummary & { from?: number; to?: number; models?: Set<string> }
     const group = (title: string): Group => ({ title, agents: 0, done: 0, tokens: 0 })
     const phases = this.phaseOrder.map(group)
     const byTitle = new Map(phases.map((p) => [p.title, p]))
@@ -389,7 +418,9 @@ export class WorkflowRun {
       const g = (r.phase !== undefined ? byTitle.get(r.phase) : undefined) ?? ungrouped
       g.agents++
       if (r.status !== "queued" && r.status !== "running") g.done++
+      if (r.status === "running") g.running = (g.running ?? 0) + 1
       if (live) g.tokens += totalTokens(r.usage)
+      if (r.model) (g.models ??= new Set()).add(r.model)
       if (r.startedAt !== undefined) {
         const end = r.endedAt ?? now
         g.from = g.from === undefined ? r.startedAt : Math.min(g.from, r.startedAt)
@@ -397,7 +428,10 @@ export class WorkflowRun {
       }
     }
     const finish = (g: Group): PhaseSummary => {
-      const out: PhaseSummary = { title: g.title, agents: g.agents, done: g.done, tokens: g.tokens }
+      const out: PhaseSummary = { title: g.title, agents: g.agents, done: g.done, running: g.running ?? 0, tokens: g.tokens }
+      const model = this.phaseModels.get(g.title)
+      if (model !== undefined && g !== ungrouped) out.model = model
+      if (g.models?.size === 1) out.agentModel = [...g.models][0]!
       if (g.from !== undefined && g.to !== undefined) out.elapsedMs = Math.max(0, g.to - g.from)
       return out
     }
@@ -417,7 +451,10 @@ export class WorkflowRun {
       transcriptDir: this.dir,
     }
     if (ungrouped.agents) s.ungrouped = finish(ungrouped)
+    const steered = this.records.filter((r) => r && isSteered(r)).length
+    if (steered) s.steeredAgents = steered
     if (this.opts.parentSessionID !== undefined) s.parentSessionID = this.opts.parentSessionID
+    if (this.opts.directory !== undefined) s.directory = this.opts.directory
     if (this.endedAt !== undefined) s.endedAt = this.endedAt
     if (this.resultValue !== undefined) s.result = this.resultValue
     if (this.error !== undefined) s.error = this.error
@@ -450,6 +487,82 @@ export class WorkflowRun {
     a.userStopped = true
     a.controller.abort()
     return true
+  }
+
+  /**
+   * Sends a steering message (X01–X05) to the agents `target` selects. Throws when the run is not
+   * running/paused or the target matches nothing (ambiguous labels list their candidates). Each
+   * targeted agent reports sent (running), held (queued) or refused (with the reason).
+   */
+  async message(target: MessageTarget, input: MessageInput): Promise<MessageReport[]> {
+    if (this.finished || (this._status !== "running" && this._status !== "paused")) {
+      throw new Error(`run ${this.runId} is not running (status: ${this._status})`)
+    }
+    const targets = this.resolveTargets(target)
+    return Promise.all(targets.map((r) => this.messageAgent(r, input)))
+  }
+
+  private resolveTargets(target: MessageTarget): AgentRecord[] {
+    const records = this.records.filter((r) => !!r)
+    const active = (r: AgentRecord) => r.status === "queued" || r.status === "running"
+    switch (target.kind) {
+      case "index": {
+        const r = this.records[target.index]
+        if (!r) throw new Error(`no agent #${target.index} in run ${this.runId} (it has ${records.length} agents so far)`)
+        return [r]
+      }
+      case "label": {
+        const hits = records.filter((r) => r.label === target.label)
+        if (!hits.length) throw new Error(`no agent labeled "${target.label}" in run ${this.runId}`)
+        if (hits.length > 1) {
+          throw new Error(
+            `label "${target.label}" matches several agents: ${hits.map((r) => `#${r.index} (${r.status})`).join(", ")}; target one by its index`,
+          )
+        }
+        return hits
+      }
+      case "phase": {
+        const inPhase = records.filter((r) => r.phase === target.phase)
+        if (!inPhase.length && !this.phaseOrder.includes(target.phase)) {
+          const known = this.phaseOrder.length ? this.phaseOrder.map((p) => `"${p}"`).join(", ") : "none"
+          throw new Error(`no phase "${target.phase}" in run ${this.runId} (phases: ${known})`)
+        }
+        const hits = inPhase.filter(active)
+        if (!hits.length) throw new Error(`no running or queued agent in phase "${target.phase}"`)
+        return hits
+      }
+      case "all": {
+        const hits = records.filter(active)
+        if (!hits.length) throw new Error(`no running or queued agent in run ${this.runId}`)
+        return hits
+      }
+    }
+  }
+
+  private async messageAgent(record: AgentRecord, input: MessageInput): Promise<MessageReport> {
+    const base = { index: record.index, label: record.label, status: record.status }
+    const a = this.live.get(record.index)
+    if (!a || (record.status !== "queued" && record.status !== "running")) {
+      return { ...base, outcome: "refused", reason: "finished", detail: `the agent is ${record.status}` }
+    }
+    const id = `wm_${record.index}_${++a.msgSeq}`
+    const urgent = !!input.urgent
+    const at = this.now()
+    const res = await a.mailbox.post({ id, from: input.from, via: input.via, text: input.text, urgent, at })
+    if (!res.ok) return { ...base, outcome: "refused", reason: res.reason, ...(res.detail ? { detail: res.detail } : {}) }
+    this.io(() =>
+      this.opts.store.appendJournal(this.runId, {
+        type: "message",
+        index: record.index,
+        id,
+        from: input.from,
+        via: input.via,
+        urgent,
+        at,
+        text: input.text,
+      }),
+    )
+    return { ...base, outcome: res.state === "held" ? "held" : "sent", messageId: id }
   }
 
   /** Stops scheduling new agents; running ones continue. */
@@ -610,6 +723,7 @@ export class WorkflowRun {
       const t = this.now()
       const record: AgentRecord = { index, key, label, phase, prompt, opts, status: "cached", usage: { ...cached.usage }, startedAt: t, endedAt: t }
       if (cached.sessionID) record.sessionID = cached.sessionID
+      if (typeof cached.model === "string" && cached.model) record.model = cached.model
       record.result = cached.value === undefined ? null : cached.value
       this.records[index] = record
       this.afterSchedule()
@@ -634,7 +748,8 @@ export class WorkflowRun {
     this.nextIndex++
     const record: AgentRecord = { index, key, label, phase, prompt, opts, status: "queued", usage: { ...ZERO_USAGE } }
     this.records[index] = record
-    const liveAgent: LiveAgent = { record, controller: new AbortController(), userStopped: false }
+    const liveAgent: LiveAgent = { record, controller: new AbortController(), userStopped: false, mailbox: undefined!, msgSeq: 0 }
+    liveAgent.mailbox = new AgentMailbox({ onChange: () => this.onMailboxChange(liveAgent) })
     this.live.set(index, liveAgent)
     this.afterSchedule()
     this.emitAgent(record)
@@ -669,6 +784,7 @@ export class WorkflowRun {
     try {
       const granted = await this.sem.acquire(controller.signal)
       if (!granted) {
+        a.mailbox.seal()
         // Stopped while queued: never started.
         if (a.userStopped) {
           this.settleAgent(a, { status: "failed", error: "stopped by user before it started", usage: { ...ZERO_USAGE } }, true)
@@ -697,6 +813,7 @@ export class WorkflowRun {
             phase: record.phase,
             signal: controller.signal,
             onUpdate: (u) => this.onAgentUpdate(record, u),
+            mailbox: a.mailbox,
           })
         } catch (e) {
           outcome = controller.signal.aborted
@@ -719,7 +836,10 @@ export class WorkflowRun {
     // only link from the transcript to that (suspended) session.
     const newSession = typeof u.sessionID === "string" && u.sessionID !== record.sessionID
     if (typeof u.sessionID === "string") record.sessionID = u.sessionID
-    if (newSession) this.io(() => this.opts.store.writeAgentRecord(this.runId, { ...record }))
+    // X18: the resolved model is persisted as soon as it is known (display only, not in the key).
+    const newModel = typeof u.model === "string" && u.model !== "" && u.model !== record.model
+    if (newModel) record.model = u.model
+    if (newSession || newModel) this.io(() => this.opts.store.writeAgentRecord(this.runId, { ...record }))
     if (u.usage) record.usage = { ...ZERO_USAGE, ...u.usage }
     // Runner notes (P26 effort ignored) and a kept worktree (P28) belong on the record/status view.
     if (Array.isArray(u.warnings)) record.warnings = u.warnings.map(String)
@@ -728,9 +848,21 @@ export class WorkflowRun {
     this.markDirty()
   }
 
+  /** A mailbox change (message held, sent, delivered, …): update the record and the views. */
+  private onMailboxChange(a: LiveAgent) {
+    const { record } = a
+    record.messages = a.mailbox.records()
+    this.emitAgent(record)
+    this.markDirty()
+    this.io(() => this.opts.store.writeAgentRecord(this.runId, { ...record }))
+  }
+
   /** Records and journals the outcome; returns agent()'s value or throws for schema_failed. */
   private settleAgent(a: LiveAgent, outcome: AgentOutcome, neverStarted: boolean): Json {
     const { record } = a
+    a.mailbox.seal()
+    const msgs = a.mailbox.records()
+    if (msgs.length) record.messages = msgs
     record.usage = { ...ZERO_USAGE, ...outcome.usage }
     if (outcome.sessionID) record.sessionID = outcome.sessionID
     record.endedAt = this.now()
@@ -738,8 +870,14 @@ export class WorkflowRun {
     let entry: JournalEntry
     let value: Json = null
     let thrown: Error | undefined
-    const base = { type: "result" as const, index: record.index, key: record.key, usage: { ...record.usage } }
-    const sid = record.sessionID ? { sessionID: record.sessionID } : {}
+    const base = {
+      type: "result" as const,
+      index: record.index,
+      key: record.key,
+      usage: { ...record.usage },
+      ...(a.mailbox.accepted() > 0 ? { steered: true } : {}),
+    }
+    const sid = { ...(record.sessionID ? { sessionID: record.sessionID } : {}), ...(record.model ? { model: record.model } : {}) }
 
     if (outcome.status === "completed") {
       record.status = "completed"
@@ -865,6 +1003,11 @@ export class WorkflowRun {
     if (this.summaryTimer) clearTimeout(this.summaryTimer)
     this.summaryTimer = undefined
   }
+}
+
+/** True when the agent accepted at least one steering message (X06). */
+function isSteered(r: AgentRecord): boolean {
+  return !!r.messages?.some((m) => m.status !== "refused")
 }
 
 /** Creates and starts a workflow run. */

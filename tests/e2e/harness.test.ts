@@ -10,6 +10,8 @@ import {
   parseNotification,
   parseRunEvents,
   readTranscript,
+  SANDBOX,
+  sandboxEnv,
   shouldRetryRun,
   summarizeRun,
   launchTurnText,
@@ -173,6 +175,15 @@ describe("harness: gating", () => {
     expect(e2eEnabled({ OPENAI_API_KEY: "k" })).toBe(false)
     expect(e2eEnabled({ OPENCODE_E2E: "1" })).toBe(false)
     expect(e2eEnabled({ OPENCODE_E2E: "0", OPENAI_API_KEY: "k" })).toBe(false)
+  })
+})
+
+describe("harness: isolation", () => {
+  test("sandboxEnv isolates XDG dirs and stops opencode's AGENTS.md walk at .sandbox (the repo's AGENTS.md is not loaded)", () => {
+    const env = sandboxEnv()
+    for (const k of ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) expect(env[k]!.startsWith(SANDBOX)).toBe(true)
+    // opencode walks up from the project to the home dir for AGENTS.md files; OPENCODE_TEST_HOME moves that home.
+    expect(env.OPENCODE_TEST_HOME).toBe(SANDBOX)
   })
 })
 

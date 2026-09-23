@@ -8,9 +8,14 @@
 // the command line is handed to the model, which shapes `args` the way Claude Code does (P53): as
 // structured JSON (array/object/number) when the workflow's description or whenToUse says it
 // expects that, otherwise as the line itself (a string). An empty line omits args.
+//
+// /workflows msg <runId> <target> <text> (and msg! for urgent) steers a running agent (X01, X05,
+// X08). <target> is an index (3 or #3), @phase or @"multi word phase", * (every running or queued
+// agent), or an exact label (quoted when it has spaces).
 
 import type { Plugin } from "@opencode/plugin"
 import { AUTHORING_REFERENCE } from "../authoring.ts"
+import type { MessageTarget } from "../types.ts"
 import { listWorkflows, type RegistryOptions } from "../registry.ts"
 import type { WorkflowHost } from "./host.ts"
 
@@ -74,15 +79,70 @@ async function show(deps: CommandDeps, sessionID: string, text: string, descript
   }
 }
 
+export const MESSAGE_USAGE =
+  "Usage: /workflows msg <runId> <target> <text>\n" +
+  '  <target>: an agent index (3 or #3), an exact label ("quoted" when it has spaces), @phase (or @"multi word phase") ' +
+  "for every running or queued agent of that phase, or * for every running or queued agent.\n" +
+  "  /workflows msg! … is urgent: it also interrupts the agent's current step (that step's tokens are lost)."
+
+/** Reads one token: a "quoted string" (the quotes are removed) or a run of non-space characters. */
+function takeToken(s: string): { token: string; rest: string; quoted: boolean } | undefined {
+  const t = s.trimStart()
+  if (!t) return undefined
+  if (t.startsWith('"')) {
+    const end = t.indexOf('"', 1)
+    if (end < 0) return undefined
+    return { token: t.slice(1, end), rest: t.slice(end + 1), quoted: true }
+  }
+  const m = /^\S+/.exec(t)!
+  return { token: m[0], rest: t.slice(m[0].length), quoted: false }
+}
+
+/** Parses the rest of a `/workflows msg` line: <runId> <target> <text…>. */
+export function parseMessageArgs(line: string): { runId: string; target: MessageTarget; text: string } | { error: string } {
+  const run = takeToken(line)
+  if (!run || run.quoted) return { error: MESSAGE_USAGE }
+  let rest = run.rest.trimStart()
+  let target: MessageTarget
+  if (rest.startsWith("@")) {
+    const t = takeToken(rest.slice(1))
+    if (!t || !t.token) return { error: MESSAGE_USAGE }
+    target = { kind: "phase", phase: t.token }
+    rest = t.rest
+  } else {
+    const t = takeToken(rest)
+    if (!t) return { error: MESSAGE_USAGE }
+    if (!t.quoted && t.token === "*") target = { kind: "all" }
+    else if (!t.quoted && /^#?\d+$/.test(t.token)) target = { kind: "index", index: Number.parseInt(t.token.replace("#", ""), 10) }
+    else if (t.token) target = { kind: "label", label: t.token }
+    else return { error: MESSAGE_USAGE }
+    rest = t.rest
+  }
+  const text = rest.trim()
+  if (!text) return { error: MESSAGE_USAGE }
+  return { runId: run.token, target, text }
+}
+
 /** Adds every command to `editor`. Called on each transform pass, so saved workflows are re-read. */
 export function addCommands(editor: { add(d: CommandDefinition): void }, deps: CommandDeps): void {
   editor.add({
     name: WORKFLOWS_COMMAND,
-    description: "list dynamic workflow runs (or /workflows <runId> for one run's agents)",
+    description:
+      "list dynamic workflow runs (/workflows <runId> for one run's agents; /workflows msg <runId> <#n|@phase|*|label> <text> to message a running agent)",
     execute: async (input: Invocation) => {
       const arg = String(input.prompt?.text ?? "").trim()
       const sessionID = String(input.sessionID)
-      const text = arg ? await deps.host.statusText(arg.split(/\s+/)[0]!, sessionID) : await deps.host.listText(sessionID)
+      const first = arg.split(/\s+/)[0] ?? ""
+      let text: string
+      if (first === "msg" || first === "msg!") {
+        const parsed = parseMessageArgs(arg.slice(first.length))
+        text =
+          "error" in parsed
+            ? parsed.error
+            : await deps.host.message({ ...parsed, urgent: first === "msg!", from: "user", via: "command" }, sessionID)
+      } else {
+        text = arg ? await deps.host.statusText(first, sessionID) : await deps.host.listText(sessionID)
+      }
       await show(deps, sessionID, text, "/workflows")
       void deps.reload().catch(() => {})
     },

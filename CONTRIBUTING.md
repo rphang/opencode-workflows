@@ -35,6 +35,10 @@ While experimenting, use an isolated opencode data and config dir (see "Live ope
 - `src/engine.ts` and its siblings are **host-agnostic**: no opencode imports. Engine tests use the
   fake runner in `tests/helpers/`.
 - Everything opencode-specific lives in `src/opencode/` and `src/plugin/`.
+- The TUI companion (the live progress tree) lives in `src/tui/`. Keep logic in the pure `store.ts`
+  (tested in `tests/parity/tui.test.ts`); the Solid `.tsx` files only render and dispatch. Check the
+  view by hand with the "TUI live check" in [`docs/E2E.md`](docs/E2E.md). `npm run build` also
+  writes `dist/tui.js`.
 - Import from `@opencode/plugin` with **`import type` only**; the runtime does not need it.
 - Plain TypeScript, ESM. opencode's Bun runtime loads `.ts` directly; `npm run build` produces the
   published `dist/` bundle.
@@ -68,8 +72,9 @@ The live suite runs only on manual dispatch and weekly (`.github/workflows/e2e.y
 
 ## Parity rule
 
-Every row of `docs/PARITY.md` has an ID (`P01`, `P02`, ...), and **every ID must have at least one
-test in `tests/parity/` whose name starts with that ID**, for example
+Every row of `docs/PARITY.md` has an ID (`P01`, `P02`, ..., and `X01`, ... for extensions beyond Claude
+Code, status `EXT`), and **every ID must have at least one test in `tests/parity/` whose name starts
+with that ID**, for example
 `test("P03 a syntax error returns async_launched with error", ...)`. A test may list several IDs up
 front (`"P41 P44 ..."`). `tests/parity/coverage.test.ts` enforces this in both directions.
 

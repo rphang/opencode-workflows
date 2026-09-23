@@ -175,7 +175,7 @@ Each run's transcript directory (`<data dir>/<sessionID>/<runId>/`) holds:
 | File | Content |
 |---|---|
 | `script.js` | The script that ran. |
-| `journal.jsonl` | One line per finished agent, with its return value. |
+| `journal.jsonl` | One line per finished agent, with its return value, plus one `{"type":"message"}` line per steering message an agent accepted. |
 | `run.json` | The run summary, including the result. |
 | `agents/<i>.json` | Each agent's prompt, result, usage and child `sessionID`. |
 
@@ -186,6 +186,13 @@ and every call after it, runs live. Same script and same args give a 100% cache 
 
 A resume is refused while agents from the stopped run are still running. Resuming an unknown run, or
 one with no finished agents, fails with `nothing to resume`.
+
+**Steered agents are never replayed.** An agent that received a message while it ran
+(`/workflows msg`, or `workflow_control` `message`) got instructions that are not part of the
+script, so its result is not reused: on resume that agent, and by the rule above every agent after
+it, runs live with its original prompt. Messages are not replayed and do not change an agent's
+identity (its cache key). To keep what a message asked for, edit the script. Scripts cannot see or
+send messages; steering is a user and parent-model feature (README, "Steering a running agent").
 
 ## Saved workflows
 

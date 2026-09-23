@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createOpencodeRunner, STRUCTURED_SUBAGENT_PREAMBLE, SUBAGENT_PREAMBLE } from "../../src/opencode/runner.ts"
 import { evaluatePermission } from "../../src/opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, SUBMIT_STORAGE_PREFIX } from "../../src/opencode/submit.ts"
-import { EFFORT_VARIANTS, parseModelRef, resolveChildModel } from "../../src/opencode/model.ts"
+import { EFFORT_VARIANTS, formatModelRef, parseModelRef, resolveChildModel } from "../../src/opencode/model.ts"
 import type { AgentOptions, AgentRecord, AgentRequest } from "../../src/types.ts"
 import { createFakeCtx, type FakeCtxOptions } from "../helpers/fake-opencode-ctx.ts"
 
@@ -546,5 +546,74 @@ describe("createOpencodeRunner", () => {
     r.controller.abort()
     expect((await p).status).toBe("stopped")
     expect(fake.calls.worktreeRemove).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+
+describe("X18 the agent's resolved model", () => {
+  test("X18 formatModelRef: provider/model#variant, variant only when set (opencode's \"default\" is no variant)", () => {
+    expect(formatModelRef({ providerID: "openai", id: "gpt-5.4-mini" })).toBe("openai/gpt-5.4-mini")
+    expect(formatModelRef({ providerID: "openai", id: "gpt-5.4-mini", variant: "high" })).toBe("openai/gpt-5.4-mini#high")
+    expect(formatModelRef({ providerID: "openai", id: "gpt-5.4-mini", variant: "default" })).toBe("openai/gpt-5.4-mini")
+    expect(formatModelRef({ providerID: "openrouter", id: "anthropic/claude-3", variant: "" })).toBe("openrouter/anthropic/claude-3")
+    expect(formatModelRef(undefined)).toBeUndefined()
+    expect(formatModelRef({ id: "x" } as any)).toBeUndefined()
+    expect(formatModelRef("openai/x" as any)).toBeUndefined()
+  })
+
+  test("X18 the model the child session reports is sent via onUpdate right after the session id, before the first prompt", async () => {
+    const { fake, runner } = setup()
+    let promptedWith: string | undefined
+    const { request, updates } = req("x", { effort: "high" })
+    const orig = fake.ctx.session.prompt
+    fake.ctx.session.prompt = async (input: any) => {
+      promptedWith ??= updates.find((u) => u.model)?.model
+      return orig(input)
+    }
+    const out = await runner.run(request)
+    expect(out.status).toBe("completed")
+    expect(updates[0]).toEqual({ sessionID: out.sessionID })
+    expect(updates[1]).toEqual({ model: "openai/gpt-5.4-mini#high" })
+    expect(promptedWith).toBe("openai/gpt-5.4-mini#high")
+    // The parent's "default" variant is not shown.
+    const plain = req("y")
+    await runner.run(plain.request)
+    expect(plain.updates.find((u) => u.model)?.model).toBe("openai/gpt-5.4-mini")
+    expect(plain.updates.some((u) => u.warnings?.length)).toBe(false)
+  })
+
+  test("X18 a child that runs on another model than requested records the actual one and a warning", async () => {
+    const { runner } = setup({ childModel: () => ({ providerID: "opencode", id: "mimo-v2.6-flash-free" }) })
+    const { request, updates } = req("x", { model: "anthropic/claude-haiku-4-5#max" })
+    await runner.run(request)
+    expect(updates.find((u) => u.model)?.model).toBe("opencode/mimo-v2.6-flash-free")
+    const warnings = updates.filter((u) => u.warnings).at(-1)?.warnings ?? []
+    expect(warnings.join("\n")).toContain("requested anthropic/claude-haiku-4-5#max")
+    expect(warnings.join("\n")).toContain("opencode/mimo-v2.6-flash-free")
+  })
+
+  test("X18 no model reported by the session: the requested one is recorded; neither known: nothing", async () => {
+    const reqd = setup({ childModel: () => undefined })
+    const a = req("x", { model: "anthropic/claude-haiku-4-5" })
+    await reqd.runner.run(a.request)
+    expect(a.updates.find((u) => u.model)?.model).toBe("anthropic/claude-haiku-4-5")
+    expect(a.updates.some((u) => u.warnings?.length)).toBe(false)
+    const none = setup({ parent: { model: undefined }, childModel: () => undefined })
+    const b = req("y")
+    await none.runner.run(b.request)
+    expect(b.updates.some((u) => "model" in u)).toBe(false)
+  })
+
+  test("X18 a model change during the run (opencode fallback) updates the model and warns once", async () => {
+    const { runner } = setup({
+      respond: () => ({ text: "ok", model: { providerID: "opencode", id: "free-model" } }),
+    })
+    const { request, updates } = req("x")
+    await runner.run(request)
+    const models = updates.filter((u) => u.model).map((u) => u.model)
+    expect(models).toEqual(["openai/gpt-5.4-mini", "opencode/free-model"])
+    const warnings = updates.filter((u) => u.warnings).at(-1)?.warnings ?? []
+    expect(warnings.filter((w) => w.includes("opencode/free-model"))).toHaveLength(1)
   })
 })

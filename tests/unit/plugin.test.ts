@@ -193,7 +193,9 @@ describe("plugin entry", () => {
       ["args", "budget", "description", "name", "resumeFromRunId", "script", "scriptPath", "title"].sort(),
     )
     const ctl = tools.get("workflow_control")!
-    expect(ctl.input.properties.action.enum).toEqual(["list", "status", "stop", "stop_agent", "pause", "resume", "save"])
+    expect(ctl.input.properties.action.enum).toEqual(["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save"])
+    // X01/X05/X08: message targets and options
+    for (const k of ["agentIndex", "label", "phase", "all", "text", "urgent"]) expect(ctl.input.properties[k]).toBeDefined()
   })
 
   test("P57 OPENCODE_DISABLE_WORKFLOWS=1 registers nothing", async () => {

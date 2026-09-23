@@ -1,6 +1,7 @@
 // Plugin-side run management: launching runs from `workflow` tool input (P01–P05, P41–P43),
 // delivering the completion notification (P06), and the management actions behind
-// `workflow_control` and `/workflows` (P50–P52).
+// `workflow_control` and `/workflows` (P50–P52), steering a running agent (X01–X08), and the
+// snapshots and user actions behind the live progress tree's RPC (X10–X13).
 
 import { realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
@@ -11,6 +12,7 @@ import {
   isRunActive,
   startRun,
   type ResolvedWorkflow as EngineWorkflow,
+  type WorkflowEvent,
   type WorkflowRef,
   type WorkflowRun,
 } from "../engine.ts"
@@ -19,8 +21,16 @@ import { extractMetaLoose, parseScript } from "../meta.ts"
 import { listWorkflows, personalWorkflowsDir, resolveWorkflow, saveWorkflow, type RegistryOptions } from "../registry.ts"
 import { checkBodySyntax } from "../sandbox.ts"
 import { RunStore, sanitizeSessionKey } from "../store.ts"
-import type { AgentRecord, AgentRunner, Json, RunSummary, WorkflowInput, WorkflowOutput } from "../types.ts"
-import { AWAIT_NOTIFICATION, formatRunList, formatRunStatus, formatTaskNotification } from "./format.ts"
+import { MAX_MESSAGE_CHARS, type MessageFrom, type MessageVia } from "../mailbox.ts"
+import type { AgentRecord, AgentRunner, Json, MessageTarget, RunSummary, WorkflowInput, WorkflowOutput } from "../types.ts"
+import {
+  AWAIT_NOTIFICATION,
+  formatMessageReports,
+  formatRunList,
+  formatRunStatus,
+  formatTaskNotification,
+  type LiveActivity,
+} from "./format.ts"
 
 /** Tool input: Claude Code's WorkflowInput plus the non-CC `budget` extension (budget.total). */
 export interface WorkflowToolInput extends WorkflowInput {
@@ -28,11 +38,29 @@ export interface WorkflowToolInput extends WorkflowInput {
 }
 
 export interface ControlInput {
-  action: "list" | "status" | "stop" | "stop_agent" | "pause" | "resume" | "save"
+  action: "list" | "status" | "stop" | "stop_agent" | "pause" | "resume" | "message" | "save"
   runId?: string
   agentIndex?: number
   name?: string
   location?: "project" | "personal"
+  /** message: target by exact label, by phase title, or every running/queued agent (X05). */
+  label?: string
+  phase?: string
+  all?: boolean
+  /** message: the instruction (1..MAX_MESSAGE_CHARS characters). */
+  text?: string
+  /** message: also interrupt the agent's current step (X08). */
+  urgent?: boolean
+}
+
+/** One steering request, from any surface (tool, command, TUI). */
+export interface MessageRequest {
+  runId: string
+  target?: MessageTarget
+  text?: unknown
+  urgent?: boolean
+  from: MessageFrom
+  via: MessageVia
 }
 
 export interface NotifyInput {
@@ -76,7 +104,38 @@ export interface HostOptions {
    * Default: no rules, so only paths inside the project / run store / saved-workflow dirs are read.
    */
   permissionRules?: (sessionID: string, agent?: string) => Promise<PermissionRule[]>
+  /** Receives every engine event of every run this host starts (the live tree, X12/X13). */
+  onEvent?: (event: WorkflowEvent) => void
+  /** Live activity of a run's running agents (X11), shown by the status views. */
+  activity?: (runId: string) => Map<number, LiveActivity>
 }
+
+/** A run's summary and agent records, for the live views (X12). */
+export interface RunSnapshot {
+  summary: RunSummary
+  /** Absent for runs listed from run.json only (runSnapshot() reads their agents). */
+  agents?: AgentRecord[]
+}
+
+/** What the live tree's RPC `control` accepts (X12): a user action, not session-scoped. */
+export interface UserControlInput {
+  runId?: string
+  action?: string
+  agentIndex?: number
+  label?: string
+  phase?: string
+  all?: boolean
+  text?: string
+  urgent?: boolean
+}
+
+export interface ActionResult {
+  ok: boolean
+  message: string
+}
+
+/** Runs kept in memory after they settle, for the live views of this instance (X12). */
+const RECENT_FINISHED = 20
 
 /** Recorded on runs stopped because the plugin instance was disposed (see WorkflowHost.dispose). */
 export const DISPOSE_STOP_REASON =
@@ -99,7 +158,10 @@ export function launchSummary(name: string, description: string, runId: string, 
   )
 }
 
-const CONTROL_RUN_ACTIONS = ["status", "stop", "stop_agent", "pause", "resume", "save"] as const
+const CONTROL_RUN_ACTIONS = ["status", "stop", "stop_agent", "pause", "resume", "message", "save"] as const
+const USER_ACTIONS = ["stop", "stop_agent", "pause", "resume", "message"] as const
+type UserAction = (typeof USER_ACTIONS)[number]
+const ACTION_LIST = "list, status, stop, stop_agent, pause, resume, message or save"
 
 function notInSession(runId: string): string {
   return `run ${runId} was not found in this session`
@@ -142,6 +204,7 @@ function nonEmpty(v: unknown): v is string {
 
 export class WorkflowHost {
   private readonly runs = new Map<string, { run: WorkflowRun; sessionID: string; notified: Promise<void> }>()
+  private readonly finished = new Map<string, RunSnapshot>()
   private disposed = false
   private keepAliveTimer: ReturnType<typeof setInterval> | undefined
   private readonly now: () => number
@@ -169,6 +232,11 @@ export class WorkflowHost {
     const out: WorkflowOutput = { status: "async_launched", taskId, taskType: "local_workflow", runId }
     const fail = (error: string): WorkflowOutput => ({ ...out, error })
     input = input ?? {}
+    // A turn that started before opencode reloaded the plugin can still hold this instance's tool. A
+    // run started here would be an orphan: the live instance could not list, stop or steer it.
+    if (this.disposed) {
+      return fail("the workflow plugin was just reloaded (or is shutting down); call the workflow tool again to launch the run")
+    }
 
     // 1. Resolve the source: scriptPath > script > name (P01).
     let source: string
@@ -264,6 +332,8 @@ export class WorkflowHost {
         now: this.opts.now,
         summaryThrottleMs: this.opts.summaryThrottleMs,
         largeWorkflowThreshold: this.opts.largeWorkflowThreshold,
+        onEvent: this.opts.onEvent,
+        directory: this.opts.cwd,
       })
     } catch (e) {
       return fail(`could not start the run: ${errMsg(e)}`)
@@ -272,6 +342,7 @@ export class WorkflowHost {
     this.runs.set(runId, { run, sessionID, notified })
     this.startKeepAlive()
     void run.settled().finally(() => {
+      this.rememberFinished({ summary: run.summary(), agents: run.agents() })
       if (this.runs.get(runId)?.run === run) this.runs.delete(runId)
       if (this.runs.size === 0) this.stopKeepAlive()
     })
@@ -452,7 +523,9 @@ export class WorkflowHost {
     const live = getActiveRun(runId)
     if (live) {
       const s = live.summary()
-      return formatRunStatus(s, live.agents(), this.now(), view)
+      const activity = this.activityOf(runId)
+      // P77: what an agent is writing or thinking is a partial result; the model sees only that it is.
+      return formatRunStatus(s, live.agents(), this.now(), { ...view, activity: view.forModel ? withoutText(activity) : activity })
     }
     const stored = await this.opts.store.readSummary(runId)
     if (!stored) return `unknown run: ${runId}`
@@ -474,48 +547,212 @@ export class WorkflowHost {
     const runId = nonEmpty(input.runId) ? input.runId.trim() : undefined
     if (!runId) return `runId is required for action "${String(action)}"`
     if (!(CONTROL_RUN_ACTIONS as readonly string[]).includes(String(action))) {
-      return `unknown action "${String(action)}"; expected list, status, stop, stop_agent, pause, resume or save`
+      return `unknown action "${String(action)}"; expected ${ACTION_LIST}`
     }
     // P75: every run action is limited to the caller's own runs.
     if (!(await this.ownsRun(runId, sessionID))) return notInSession(runId)
     switch (action) {
       case "status":
         return this.statusText(runId, sessionID, { forModel: true })
-      case "stop": {
-        const run = getActiveRun(runId)
-        if (!run) return `run ${runId} is not running (unknown or already finished)`
-        if (run.status !== "running" && run.status !== "paused") {
-          return `run ${runId} was already stopped; its remaining agents are still exiting`
-        }
-        run.stop()
-        return `Stopping run ${runId}. Running agents are interrupted and are not counted as failed; relaunch with resumeFromRunId "${runId}" to continue.`
-      }
-      case "stop_agent": {
-        const run = getActiveRun(runId)
-        if (!run) return `run ${runId} is not running (unknown or already finished)`
-        const idx = input.agentIndex
-        if (typeof idx !== "number" || !Number.isInteger(idx)) return "agentIndex (integer) is required for stop_agent"
-        return run.stopAgent(idx)
-          ? `Stopped agent ${idx} of run ${runId}; it counts as failed and its agent() call resolves to null.`
-          : `agent ${idx} of run ${runId} is not queued or running`
-      }
-      case "pause": {
-        const run = getActiveRun(runId)
-        if (!run) return `run ${runId} is not running (unknown or already finished)`
-        return run.pause()
-          ? `Paused run ${runId}: no new agents start; running agents finish.`
-          : `run ${runId} cannot be paused (status: ${run.status})`
-      }
-      case "resume": {
-        const run = getActiveRun(runId)
-        if (!run) return `run ${runId} is not running (unknown or already finished); relaunch it with resumeFromRunId instead`
-        return run.resume() ? `Resumed run ${runId}.` : `run ${runId} is not paused (status: ${run.status})`
-      }
       case "save":
         return this.save(runId, input)
+      case "stop":
+      case "stop_agent":
+      case "pause":
+      case "resume":
+      case "message":
+        return (await this.runAction(action, runId, getActiveRun(runId), input, { from: "model", via: "tool" })).message
       default:
-        return `unknown action "${String(action)}"; expected list, status, stop, stop_agent, pause, resume or save`
+        return `unknown action "${String(action)}"; expected ${ACTION_LIST}`
     }
+  }
+
+  /**
+   * The live tree's `control` (X12): stop, stop_agent, pause, resume or message a run as the USER. It
+   * reaches only the runs THIS plugin instance started (its Location): a run of another project in the
+   * same opencode process is "not running" here. Within the Location it is not session-scoped: the RPC
+   * has the trust of the server API (its password), which already lets a client prompt any session.
+   * The model-facing paths (workflow_control, commands) keep P75.
+   */
+  async userControl(input: UserControlInput): Promise<ActionResult> {
+    const runId = nonEmpty(input?.runId) ? input.runId.trim() : undefined
+    if (!runId) return { ok: false, message: "runId is required" }
+    const action = String(input.action ?? "")
+    if (!(USER_ACTIONS as readonly string[]).includes(action)) {
+      return { ok: false, message: `unknown action "${action}"; expected ${USER_ACTIONS.join(", ")}` }
+    }
+    return this.runAction(action as UserAction, runId, this.ownActiveRun(runId), input as ControlInput, { from: "user", via: "rpc" })
+  }
+
+  /** A live run this instance started (the RPC's view: runs of this Location only). */
+  private ownActiveRun(runId: string): WorkflowRun | undefined {
+    const run = this.runs.get(runId)?.run
+    return run && isRunActive(runId) ? run : undefined
+  }
+
+  /** True when a stored run belongs to this instance's Location (run.json `directory`, X12). */
+  private isOwnStored(s: Pick<RunSummary, "directory">): boolean {
+    return typeof s.directory === "string" && samePath(s.directory, this.opts.cwd)
+  }
+
+  /** stop / stop_agent / pause / resume / message on a live run (after the caller's ownership check, if any). */
+  private async runAction(
+    action: UserAction,
+    runId: string,
+    run: WorkflowRun | undefined,
+    input: ControlInput,
+    who: { from: MessageFrom; via: MessageVia },
+  ): Promise<ActionResult> {
+    const notRunning = `run ${runId} is not running (unknown or already finished)`
+    switch (action) {
+      case "stop": {
+        if (!run) return { ok: false, message: notRunning }
+        if (run.status !== "running" && run.status !== "paused") {
+          return { ok: false, message: `run ${runId} was already stopped; its remaining agents are still exiting` }
+        }
+        run.stop()
+        return {
+          ok: true,
+          message: `Stopping run ${runId}. Running agents are interrupted and are not counted as failed; relaunch with resumeFromRunId "${runId}" to continue.`,
+        }
+      }
+      case "stop_agent": {
+        if (!run) return { ok: false, message: notRunning }
+        const idx = input.agentIndex
+        if (typeof idx !== "number" || !Number.isInteger(idx)) return { ok: false, message: "agentIndex (integer) is required for stop_agent" }
+        return run.stopAgent(idx)
+          ? { ok: true, message: `Stopped agent ${idx} of run ${runId}; it counts as failed and its agent() call resolves to null.` }
+          : { ok: false, message: `agent ${idx} of run ${runId} is not queued or running` }
+      }
+      case "pause":
+        if (!run) return { ok: false, message: notRunning }
+        return run.pause()
+          ? { ok: true, message: `Paused run ${runId}: no new agents start; running agents finish.` }
+          : { ok: false, message: `run ${runId} cannot be paused (status: ${run.status})` }
+      case "resume":
+        if (!run) return { ok: false, message: `${notRunning}; relaunch it with resumeFromRunId instead` }
+        return run.resume()
+          ? { ok: true, message: `Resumed run ${runId}.` }
+          : { ok: false, message: `run ${runId} is not paused (status: ${run.status})` }
+      case "message": {
+        const target = controlTarget(input)
+        if (typeof target === "string") return { ok: false, message: target }
+        return this.sendMessage({ runId, target, text: input.text, urgent: input.urgent === true, ...who }, run)
+      }
+    }
+  }
+
+  /**
+   * Steers running agents of one of the caller's runs (X01–X08): workflow_control `message` (the
+   * parent model), `/workflows msg` (the user). P75: another session's run is "not found". The
+   * text is validated before anything is sent; each targeted agent gets one reply line.
+   */
+  async message(req: MessageRequest, sessionID: string): Promise<string> {
+    const runId = String(req.runId ?? "").trim()
+    if (!runId) return "runId is required to send a message"
+    if (!(await this.ownsRun(runId, sessionID))) return notInSession(runId)
+    return (await this.sendMessage({ ...req, runId }, getActiveRun(runId))).message
+  }
+
+  /**
+   * Validates and sends one steering request to `run` (the live run the caller resolved). No ownership
+   * check: callers do it (P75), or scope the run lookup to this instance (RPC, X12).
+   */
+  private async sendMessage(req: MessageRequest, run: WorkflowRun | undefined): Promise<ActionResult> {
+    const runId = String(req.runId ?? "").trim()
+    const text = typeof req.text === "string" ? req.text.trim() : ""
+    if (!text) return { ok: false, message: 'text is required for action "message": the instruction to send to the agent' }
+    if (text.length > MAX_MESSAGE_CHARS) {
+      return {
+        ok: false,
+        message: `the message text is too long (${text.length} characters); it can be at most ${MAX_MESSAGE_CHARS} characters`,
+      }
+    }
+    if (!req.target) return { ok: false, message: "a message needs exactly one target: agentIndex, label, phase or all:true" }
+    if (!run || (run.status !== "running" && run.status !== "paused")) {
+      return { ok: false, message: `run ${runId} is not running; messages can only be sent to the agents of a running run` }
+    }
+    let reports
+    try {
+      reports = await run.message(req.target, { from: req.from, via: req.via, text, urgent: !!req.urgent })
+    } catch (e) {
+      return { ok: false, message: errMsg(e) }
+    }
+    return {
+      ok: reports.some((r) => r.outcome !== "refused"),
+      message: formatMessageReports(runId, reports, { urgent: !!req.urgent, forModel: req.from === "model" }),
+    }
+  }
+
+  // ---- live views (X12) ---------------------------------------------------------------------------
+
+  private activityOf(runId: string): Map<number, LiveActivity> | undefined {
+    try {
+      return this.opts.activity?.(runId)
+    } catch {
+      return undefined
+    }
+  }
+
+  private rememberFinished(snap: RunSnapshot): void {
+    this.finished.delete(snap.summary.runId)
+    this.finished.set(snap.summary.runId, snap)
+    while (this.finished.size > RECENT_FINISHED) this.finished.delete(this.finished.keys().next().value!)
+  }
+
+  /** A run of this instance held in memory: live, or finished during this instance (X12). */
+  snapshot(runId: string): RunSnapshot | undefined {
+    const live = this.runs.get(runId)?.run
+    if (live && isRunActive(runId)) return { summary: live.summary(), agents: live.agents() }
+    return this.finished.get(runId) ?? (live ? { summary: live.summary(), agents: live.agents() } : undefined)
+  }
+
+  /**
+   * A run of this Location: in memory, else from run.json and its agent records (a run cut off mid-way
+   * shows as stopped). A stored run another Location started (or one from before run.json recorded its
+   * `directory`) is unknown here, so one project's RPC never reads another's runs (X12).
+   */
+  async runSnapshot(runId: string): Promise<RunSnapshot | undefined> {
+    const mem = this.snapshot(runId)
+    if (mem) return mem
+    const stored = await this.opts.store.readSummary(runId)
+    if (!stored || !this.isOwnStored(stored)) return undefined
+    const summary = reconcileStored(stored)
+    const orphaned = summary !== stored
+    const agents: AgentRecord[] = []
+    for (let i = 0; i < summary.agentCount; i++) {
+      const r = await this.opts.store.readAgentRecord(runId, i)
+      if (r) agents.push(orphaned && (r.status === "running" || r.status === "queued") ? { ...r, status: "stopped" } : r)
+    }
+    return { summary, agents }
+  }
+
+  /**
+   * Runs for the live tree, all of this Location: one session's runs (live and run.json) with
+   * `sessionID`, else every run this instance started or finished. Active runs first, then the newest
+   * finished ones.
+   */
+  async listSnapshots(input: { sessionID?: string; all?: boolean; limit?: number } = {}): Promise<RunSnapshot[]> {
+    const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : 20
+    let out: RunSnapshot[]
+    if (nonEmpty(input.sessionID) && !input.all) {
+      const summaries = await this.listSessionRuns(input.sessionID)
+      out = []
+      for (const s of summaries) {
+        const mem = this.snapshot(s.runId)
+        if (mem) out.push(mem)
+        else if (this.isOwnStored(s) && !isRunActive(s.runId)) out.push({ summary: s })
+      }
+    } else {
+      const byId = new Map<string, RunSnapshot>()
+      for (const snap of this.finished.values()) byId.set(snap.summary.runId, snap)
+      for (const { run } of this.runs.values()) byId.set(run.runId, { summary: run.summary(), agents: run.agents() })
+      out = [...byId.values()].sort(
+        (a, b) => b.summary.startedAt - a.summary.startedAt || (a.summary.runId < b.summary.runId ? 1 : -1),
+      )
+    }
+    const active = (x: RunSnapshot) => x.summary.status === "running" || x.summary.status === "paused"
+    return [...out.filter(active), ...out.filter((x) => !active(x))].slice(0, limit)
   }
 
   private async save(runId: string, input: ControlInput): Promise<string> {
@@ -576,6 +813,41 @@ export class WorkflowHost {
       new Promise((r) => setTimeout(r, waitMs)),
     ])
   }
+}
+
+/** Same path, spelled either way (case-insensitive on Windows). */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const r = resolvePath(p).replace(/[\\/]+$/, "")
+    return process.platform === "win32" ? r.toLowerCase() : r
+  }
+  return norm(a) === norm(b)
+}
+
+/**
+ * The live activity without what agents are writing or thinking (P77): the model-facing status shows
+ * `writing…` / `thinking…` and tool calls, never a partial answer.
+ */
+function withoutText(activity: Map<number, LiveActivity> | undefined): Map<number, LiveActivity> | undefined {
+  if (!activity) return undefined
+  const out = new Map<number, LiveActivity>()
+  for (const [i, a] of activity) out.set(i, a.kind === "text" || a.kind === "reasoning" ? { ...a, text: "" } : a)
+  return out
+}
+
+/** The one target a workflow_control `message` names, or the error text. */
+function controlTarget(input: ControlInput): MessageTarget | string {
+  const targets: MessageTarget[] = []
+  if (input.agentIndex !== undefined && input.agentIndex !== null) {
+    const idx = input.agentIndex
+    if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0) return "agentIndex must be a non-negative integer"
+    targets.push({ kind: "index", index: idx })
+  }
+  if (nonEmpty(input.label)) targets.push({ kind: "label", label: input.label.trim() })
+  if (nonEmpty(input.phase)) targets.push({ kind: "phase", phase: input.phase.trim() })
+  if (input.all === true) targets.push({ kind: "all" })
+  if (targets.length !== 1) return "a message needs exactly one target: agentIndex, label, phase or all:true"
+  return targets[0]!
 }
 
 /**

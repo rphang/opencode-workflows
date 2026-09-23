@@ -1,4 +1,5 @@
-// Plugin setup: registers the tools and commands and returns the cleanup that stops every run.
+// Plugin setup: registers the tools and commands, the live-tree RPC and activity tap (X11–X13), and
+// returns the cleanup that stops every run.
 
 import { existsSync, watch, type FSWatcher } from "node:fs"
 import { join } from "node:path"
@@ -12,10 +13,13 @@ import type { AgentRunner } from "../types.ts"
 import { addCommands } from "./commands.ts"
 import { largeWorkflowThreshold, resolveSizeGuideline, sizeGuidelineAdvice } from "./guideline.ts"
 import { WorkflowHost } from "./host.ts"
+import { LiveRuntime } from "./rpc.ts"
 import { CONTROL_TOOL_NAME, createControlTool, createWorkflowTool, WORKFLOW_TOOL_NAME, workflowToolDescription } from "./tools.ts"
 
 export const PLUGIN_ID = "dynamic-workflows"
 export const DISABLE_ENV = "OPENCODE_DISABLE_WORKFLOWS"
+/** `0`/`false`/`no`/`off` makes the live tree's RPC read-only (X17). */
+export const RPC_CONTROL_ENV = "OPENCODE_WORKFLOW_RPC_CONTROL"
 
 /** Injection seams (tests) and host overrides. Everything is optional. */
 export interface PluginDeps {
@@ -32,9 +36,20 @@ export interface PluginDeps {
   summaryThrottleMs?: number
   /** Parent-location keep-alive period while a run is active (default KEEP_ALIVE_MS; 0 disables). */
   keepAliveMs?: number
+  /** Live-tree delta interval (default 250 ms, X13). */
+  liveIntervalMs?: number
 }
 
 const TRUTHY = /^(1|true|yes|on)$/i
+const FALSY = /^(0|false|no|off)$/i
+
+/** X17: the RPC's `control` is on unless env OPENCODE_WORKFLOW_RPC_CONTROL is falsy or option `rpcControl` is false. */
+export function rpcControlEnabled(env: Record<string, string | undefined>, options: Record<string, unknown> | undefined): boolean {
+  const raw = env[RPC_CONTROL_ENV]
+  if (raw !== undefined && FALSY.test(raw.trim())) return false
+  const opt = options?.rpcControl
+  return !(opt === false || (typeof opt === "string" && FALSY.test(opt.trim())))
+}
 
 /** P57: env OPENCODE_DISABLE_WORKFLOWS=1 (true/yes/on) or plugin option `disabled: true`. */
 export function isDisabled(env: Record<string, string | undefined>, options: Record<string, unknown> | undefined): boolean {
@@ -77,6 +92,15 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     await ctx.tool.reload?.()
   }
 
+  // Live progress tree (X11–X13): activity from the event stream, views and events over ctx.rpc.
+  const events = (ctx as any).event as { subscribe?: (options?: { signal?: AbortSignal }) => AsyncIterable<unknown> } | undefined
+  const live = new LiveRuntime({
+    directory: cwd,
+    subscribe: typeof events?.subscribe === "function" ? (signal) => events.subscribe!({ signal }) : undefined,
+    intervalMs: deps.liveIntervalMs,
+    control: rpcControlEnabled(env, options),
+  })
+
   const host = new WorkflowHost({
     cwd,
     store,
@@ -98,40 +122,61 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     // P76: scriptPath reads honour the caller's read/external_directory rules, like opencode's read tool.
     projectRoots: projectRoot(ctx),
     permissionRules: (sessionID, agent) => effectiveSessionRules(ctx, sessionID, agent),
+    onEvent: live.onEvent,
+    activity: live.activityFor,
   })
+  live.attach(host)
 
   const registrations: { dispose: () => Promise<void> }[] = []
-  // P63: an "ask" in a workflow child would wait forever (nobody sees that session): deny it instead.
-  // Registered by every instance, so a worktree instance guards the children in its own location.
-  const permissionHook = (ctx as any).permission?.hook as Plugin.Context["permission"]["hook"] | undefined
-  if (typeof permissionHook === "function") {
-    registrations.push(await permissionHook("evaluate", createChildAskGuard(ctx)))
-  }
-  registrations.push(
-    await ctx.tool.transform((editor) => {
-      let saved: ReturnType<typeof listWorkflows> = []
+  const disposeAll = async () => {
+    await host.dispose()
+    await live.dispose()
+    for (const r of registrations.splice(0)) {
       try {
-        saved = listWorkflows(cwd, registryOptions)
+        await r.dispose()
       } catch {}
-      editor.add(createWorkflowTool(host, workflowToolDescription({ saved, sizeAdvice })))
-      editor.add(createControlTool(host))
-      editor.add(createSubmitTool(submitRegistry))
-    }),
-  )
-  registrations.push(
-    await ctx.command.transform((editor) => {
-      addCommands(editor, {
-        host,
-        cwd,
-        registryOptions,
-        reload: reloadCommands,
-        session: {
-          synthetic: (input) => ctx.session.synthetic(input as any),
-          prompt: (input) => ctx.session.prompt(input),
-        },
-      })
-    }),
-  )
+    }
+  }
+  try {
+    live.start()
+    await live.register((ctx as any).rpc)
+    // P63: an "ask" in a workflow child would wait forever (nobody sees that session): deny it instead.
+    // Registered by every instance, so a worktree instance guards the children in its own location.
+    const permissionHook = (ctx as any).permission?.hook as Plugin.Context["permission"]["hook"] | undefined
+    if (typeof permissionHook === "function") {
+      registrations.push(await permissionHook("evaluate", createChildAskGuard(ctx)))
+    }
+    registrations.push(
+      await ctx.tool.transform((editor) => {
+        let saved: ReturnType<typeof listWorkflows> = []
+        try {
+          saved = listWorkflows(cwd, registryOptions)
+        } catch {}
+        editor.add(createWorkflowTool(host, workflowToolDescription({ saved, sizeAdvice })))
+        editor.add(createControlTool(host))
+        editor.add(createSubmitTool(submitRegistry))
+      }),
+    )
+    registrations.push(
+      await ctx.command.transform((editor) => {
+        addCommands(editor, {
+          host,
+          cwd,
+          registryOptions,
+          reload: reloadCommands,
+          session: {
+            synthetic: (input) => ctx.session.synthetic(input as any),
+            prompt: (input) => ctx.session.prompt(input),
+          },
+        })
+      }),
+    )
+  } catch (e) {
+    // Setup failed half-way: opencode gets no cleanup, so nothing registered so far may outlive it
+    // (the RPC would answer for a host without tools; the activity tap would keep reading events).
+    await disposeAll()
+    throw e
+  }
 
   const watchers = deps.watch === false ? [] : watchWorkflowDirs(cwd, registryOptions, reloadCommands)
 
@@ -141,12 +186,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
         w.close()
       } catch {}
     }
-    await host.dispose()
-    for (const r of registrations) {
-      try {
-        await r.dispose()
-      } catch {}
-    }
+    await disposeAll()
   }
 }
 

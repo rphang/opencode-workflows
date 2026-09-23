@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RunStore, defaultDataRoot, newRunId } from "../../src/store.ts"
 import { ReplayCursor, agentKey, canonicalJson, loadForResume } from "../../src/journal.ts"
-import type { JournalEntry, RunSummary } from "../../src/types.ts"
+import type { JournalEntry, JournalMessage, RunSummary } from "../../src/types.ts"
 import { ZERO_USAGE } from "../../src/types.ts"
 
 let root: string
@@ -406,5 +406,76 @@ describe("loadForResume", () => {
     expect(r.cursor.take(2, keys[2])).toBeUndefined()
     expect(r.cursor.take(3, keys[3])).toBeUndefined()
     expect(r.cursor.hits).toBe(1)
+  })
+})
+
+// ---- steering (X06) ---------------------------------------------------------------------------
+
+describe("journal message lines (X06)", () => {
+  const message = (index: number, id: string, text = "focus on src/auth"): JournalMessage => ({
+    type: "message",
+    index,
+    id,
+    from: "user",
+    via: "command",
+    urgent: false,
+    at: 5,
+    text,
+  })
+
+  test("readJournal ignores message lines (an older reader sees only results)", async () => {
+    const { runId } = await store.createRun("ses_1")
+    await store.appendJournal(runId, entry(0, "k0"))
+    await store.appendJournal(runId, message(1, "wm_1_1"))
+    await store.appendJournal(runId, entry(1, "k1"))
+    expect((await store.readJournal(runId)).map((e) => e.index)).toEqual([0, 1])
+    const raw = await readFile(join(await store.runDir(runId), "journal.jsonl"), "utf8")
+    expect(raw).toContain('"type":"message"')
+  })
+
+  test("readJournalMessages returns only message lines, in file order; [] without a journal", async () => {
+    const { runId } = await store.createRun("ses_1")
+    expect(await store.readJournalMessages(runId)).toEqual([])
+    await store.appendJournal(runId, message(2, "wm_2_1", "a"))
+    await store.appendJournal(runId, entry(0, "k0"))
+    await store.appendJournal(runId, message(0, "wm_0_1", "b"))
+    const msgs = await store.readJournalMessages(runId)
+    expect(msgs.map((m) => [m.index, m.id, m.text])).toEqual([
+      [2, "wm_2_1", "a"],
+      [0, "wm_0_1", "b"],
+    ])
+  })
+
+  test("ReplayCursor: an index in the steered set is a miss, and everything after it runs live", () => {
+    const c = new ReplayCursor([entry(0, "a"), entry(1, "b"), entry(2, "c")], new Set([1]))
+    expect(c.take(0, "a")?.value).toBe("v0")
+    expect(c.take(1, "b")).toBeUndefined()
+    expect(c.take(2, "c")).toBeUndefined()
+    expect(c.hits).toBe(1)
+    expect(c.diverged).toBe(true)
+  })
+
+  test("ReplayCursor: a result entry flagged steered is a miss even without a message line", () => {
+    const c = new ReplayCursor([entry(0, "a"), { ...entry(1, "b"), steered: true }])
+    expect(c.take(0, "a")).toBeDefined()
+    expect(c.take(1, "b")).toBeUndefined()
+  })
+
+  test("ReplayCursor without messages behaves as before (P41 regression)", () => {
+    const c = new ReplayCursor([entry(0, "a"), entry(1, "b")], new Set())
+    expect(c.take(0, "a")).toBeDefined()
+    expect(c.take(1, "b")).toBeDefined()
+    expect(c.diverged).toBe(false)
+  })
+
+  test("loadForResume builds the steered set from message lines", async () => {
+    const { runId } = await store.createRun("ses_1")
+    await store.appendJournal(runId, entry(0, "a"))
+    await store.appendJournal(runId, entry(1, "b"))
+    await store.appendJournal(runId, message(1, "wm_1_1"))
+    const r = await loadForResume(store, runId)
+    expect([...r.steered]).toEqual([1])
+    expect(r.cursor.take(0, "a")).toBeDefined()
+    expect(r.cursor.take(1, "b")).toBeUndefined()
   })
 })

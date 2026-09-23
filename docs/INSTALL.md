@@ -183,3 +183,18 @@ through the root `server.ts`, which re-exports `src/index.ts`. A file path such 
 `.../src/index.ts` fails with `configured plugin path must be a directory`. This form accepts
 options: `{ "package": "file:///absolute/path/to/opencode-workflows", "options": { ... } }`.
 `server.ts` is not in the npm package, so this only works from a git checkout.
+
+### The TUI part (live progress tree)
+
+opencode finds a plugin's TUI entry next to its server entry (`Host.resolve` looks for `<package>/tui`
+or `<directory>/tui`), and the TUI loads it for every active server plugin that has one
+(`GET /api/plugin` shows `"features":{"server":true,"tui":true}`):
+
+| Install | TUI entry | Live tree |
+|---|---|---|
+| npm package (`plugins` entry or `opencode plugin add`) | `exports["./tui"]` → `dist/tui.js`, precompiled | yes (verified live on 2.0.15) |
+| Directory entry (`file:///…/opencode-workflows`) | the repo's `tui.tsx`, which the TUI compiles itself | yes |
+| Loader file (`plugins/workflows.js`) | none: a single file only has a server entry | no; `/workflows` still works |
+
+`dist/tui.js` imports `solid-js`, `@opentui/*` and `@opencode/plugin/tui` without bundling them: the
+TUI provides its own copies at runtime, so the package has no new dependencies.

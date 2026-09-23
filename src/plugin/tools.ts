@@ -3,6 +3,7 @@
 
 import type { Plugin } from "@opencode/plugin"
 import { TOOL_DESCRIPTION } from "../authoring.ts"
+import { MAX_MESSAGE_CHARS } from "../mailbox.ts"
 import type { WorkflowMeta } from "../types.ts"
 import type { ControlInput, WorkflowHost, WorkflowToolInput } from "./host.ts"
 
@@ -40,14 +41,27 @@ export const WORKFLOW_INPUT_SCHEMA = {
   },
 } as const
 
-export const CONTROL_ACTIONS = ["list", "status", "stop", "stop_agent", "pause", "resume", "save"] as const
+export const CONTROL_ACTIONS = ["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save"] as const
 
 export const CONTROL_INPUT_SCHEMA = {
   type: "object",
   properties: {
     action: { type: "string", enum: [...CONTROL_ACTIONS], description: "What to do." },
-    runId: { type: "string", description: "Target run (required for every action except list)." },
-    agentIndex: { type: "integer", minimum: 0, description: "stop_agent: the agent's index (#N in status)." },
+    runId: { type: "string", maxLength: 200, description: "Target run (required for every action except list)." },
+    agentIndex: { type: "integer", minimum: 0, description: "stop_agent / message: the agent's index (#N in status)." },
+    label: { type: "string", maxLength: 200, description: "message: target the one agent with exactly this label." },
+    phase: { type: "string", maxLength: 200, description: "message: target every running or queued agent of this phase." },
+    all: { type: "boolean", description: "message: target every running or queued agent of the run." },
+    text: {
+      type: "string",
+      maxLength: MAX_MESSAGE_CHARS,
+      description: "message: the instruction to send (at most 4000 characters). Give exactly one target: agentIndex, label, phase or all.",
+    },
+    urgent: {
+      type: "boolean",
+      description:
+        "message: also interrupt the agent's current step so it reads the message right away (that step's tokens are lost). Default false.",
+    },
     name: { type: "string", description: "save: file name for the saved script (default: meta.name)." },
     location: {
       type: "string",
@@ -67,8 +81,10 @@ export const CONTROL_TOOL_DESCRIPTION =
   "not the result), " +
   "stop (stop a whole run; running agents are not counted as failed and restart on resume), stop_agent " +
   "(stop one agent; it counts as failed and its agent() call returns null), pause / resume (stop / restart " +
-  "scheduling new agents), save (save a run's script as a reusable /<name> command in the project or personal " +
-  "workflows directory). Only use stop/stop_agent/pause/save when the user asks for it."
+  "scheduling new agents), message (send an instruction to a running agent of your run without restarting it; it is " +
+  "read at the agent's next step boundary; a queued agent gets it with its first prompt), save (save a run's script " +
+  "as a reusable /<name> command in the project or personal workflows directory). Only use stop/stop_agent/pause/" +
+  "save when the user asks for it, and message only when the user asks you to redirect agents."
 
 function text(content: string) {
   return { content }

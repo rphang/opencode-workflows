@@ -2,7 +2,9 @@
 // documents the install methods and every environment variable the plugin reads.
 
 import { describe, expect, test } from "bun:test"
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Host } from "@opencode/plugin/host"
 
@@ -13,7 +15,7 @@ function walk(dir: string): string[] {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name)
     if (statSync(p).isDirectory()) out.push(...walk(p))
-    else if (p.endsWith(".ts")) out.push(p)
+    else if (p.endsWith(".ts") || p.endsWith(".tsx")) out.push(p)
   }
   return out
 }
@@ -26,6 +28,44 @@ describe("plugin directory install", () => {
     const direct = (await import(join(ROOT, "src", "index.ts"))) as { default: unknown }
     expect(mod.default).toBe(direct.default)
   })
+})
+
+describe("TUI entry (live progress tree, X14)", () => {
+  test("Host.resolve finds the TUI entry of the repo directory (root tui.tsx)", () => {
+    const entries = Host.resolve({ directory: ROOT } as never)
+    expect(String(entries.tui)).toMatch(/tui\.tsx$/)
+  })
+
+  test("the server entry never imports the TUI or its host modules (it loads without the TUI peers)", () => {
+    const offenders = walk(join(ROOT, "src"))
+      .filter((f) => !/[\\/]tui[\\/]/.test(f))
+      .filter((f) => /from ["'](solid-js|@opentui\/|\.\.?\/(\.\.\/)*tui\/)/.test(readFileSync(f, "utf8")))
+    expect(offenders).toEqual([])
+  })
+
+  test("dist/tui.js build: compiled JSX, host modules external, no bundled solid-js; the package's ./tui export resolves to it", async () => {
+    const { buildTui, TUI_EXTERNALS } = await import("../../scripts/build-tui.ts")
+    const tmp = await mkdtemp(join(tmpdir(), "wf-tui-build-"))
+    try {
+      const pkgDir = join(tmp, "node_modules", "@rphang", "opencode-workflows")
+      mkdirSync(join(pkgDir, "dist"), { recursive: true })
+      writeFileSync(join(pkgDir, "package.json"), readFileSync(join(ROOT, "package.json")))
+      writeFileSync(join(pkgDir, "dist", "index.js"), "export default {}\n")
+      const out = await buildTui(join(pkgDir, "dist"))
+      const code = readFileSync(out, "utf8")
+      expect(code).not.toMatch(/<(box|text|Show|For|Panel)\b/)
+      const imports = [...code.matchAll(/^import .* from "([^"]+)";?$/gm)].map((m) => m[1]!)
+      expect(imports.length).toBeGreaterThan(0)
+      expect(imports.filter((s) => !TUI_EXTERNALS.includes(s))).toEqual([])
+      expect(code).not.toMatch(/function createSignal\(/)
+      expect(code).toMatch(/dynamic-workflows\.tui/)
+      const entries = Host.resolve({ name: "@rphang/opencode-workflows", directory: tmp } as never)
+      expect(String(entries.tui).replaceAll("\\", "/")).toMatch(/opencode-workflows\/dist\/tui\.js$/)
+      expect(String(entries.server).replaceAll("\\", "/")).toMatch(/opencode-workflows\/dist\/index\.js$/)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }, 60_000)
 })
 
 describe("README", () => {

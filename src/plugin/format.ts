@@ -1,7 +1,8 @@
 // Text rendering for the plugin: the task notification delivered to the parent session when a run
-// finishes (P06), and the /workflows list / status views (P50, degraded to plain text).
+// finishes (P06), and the /workflows list / status views (P50, degraded to plain text). The views
+// also show each phase's model label (X10) and, for running agents, the live activity overlay (X11).
 
-import { totalTokens, type AgentRecord, type PhaseSummary, type RunSummary } from "../types.ts"
+import { totalTokens, type AgentRecord, type MessageReport, type PhaseSummary, type RunSummary } from "../types.ts"
 
 /** "0.9s", "42.0s", "1m05s", "1h02m". */
 export function formatDuration(ms: number): string {
@@ -16,6 +17,12 @@ export function formatDuration(ms: number): string {
   const h = Math.floor(totalSec / 3600)
   const m = Math.floor((totalSec % 3600) / 60)
   return `${h}h${String(m).padStart(2, "0")}m`
+}
+
+/** 0.4213 → "$0.42", 0.0042 → "$0.0042". */
+export function formatCost(n: number): string {
+  if (!(n > 0)) return "$0"
+  return "$" + (n >= 0.01 ? n.toFixed(2) : n.toFixed(4))
 }
 
 /** 950 → "950", 12_345 → "12.3k", 2_500_000 → "2.5M". */
@@ -62,6 +69,14 @@ export function formatTaskNotification(s: RunSummary, now: number = Date.now()):
     `<usage>agent_count: ${s.agentCount}\ntokens: ${totalTokens(s.usage)}\nduration_ms: ${elapsed(s, now)}</usage>`,
   ]
   if (s.warnings.length) lines.push(`<warnings>${s.warnings.join("\n")}</warnings>`)
+  // X06: the result reflects mid-run instructions that the script does not contain.
+  if (s.steeredAgents) {
+    const n = s.steeredAgents
+    lines.push(
+      `<steering>${n} agent${n === 1 ? "" : "s"} received messages during the run (see /workflows ${s.runId}). ` +
+        "Their results reflect those messages, which the script does not contain and a resume does not replay.</steering>",
+    )
+  }
   if (s.scriptPath) lines.push(`<script-path>${s.scriptPath}</script-path>`)
   if (s.transcriptDir) lines.push(`<transcript-dir>${s.transcriptDir}</transcript-dir>`)
   lines.push("</task-notification>")
@@ -100,19 +115,59 @@ const STATUS_ICON: Record<string, string> = {
   stopped: "■",
 }
 
-/** One run as a block of lines: header + per-phase counts. */
+/** One run as a block of lines: header + per-phase counts (with the phase's model label, X10). */
 function phaseLine(p: PhaseSummary): string {
   const time = p.elapsedMs !== undefined ? `  ${formatDuration(p.elapsedMs)}` : ""
-  return `    ${p.title}  ${p.done}/${p.agents}  ${formatTokens(p.tokens)} tokens${time}`
+  const label = p.model ?? p.agentModel
+  const model = label ? ` (${label})` : ""
+  const running = p.running ? `  ${p.running} running` : ""
+  return `    ${p.title}${model}  ${p.done}/${p.agents}${running}  ${formatTokens(p.tokens)} tokens${time}`
+}
+
+/** `openai/gpt-5.4-mini` of `openai/gpt-5.4-mini#high` (live step events carry no variant). */
+export function modelBase(model: string): string {
+  const i = model.indexOf("#")
+  return i < 0 ? model : model.slice(0, i)
+}
+
+/**
+ * The model to show for an agent (X19): the recorded one (with its variant), unless its live step runs
+ * on another model (an opencode fallback not yet recorded), then that one; else `fallback`.
+ */
+export function shownModel(recorded: string | null | undefined, live: string | null | undefined, fallback: string | null = null): string | null {
+  if (live && (!recorded || modelBase(recorded) !== live)) return live
+  return recorded || fallback
+}
+
+/** What a running agent is doing right now (X11): the live overlay from the activity tap. */
+export interface LiveActivity {
+  kind: "tool" | "text" | "reasoning" | "waiting"
+  text: string
+  at: number
+  tokens: number
+  cost: number
+  model: string | null
+}
+
+/**
+ * "» bash npm test", '“The main risk…”', "thinking…", "waiting for the model". Narrow glyphs only:
+ * emoji-capable ones (⚙ ✎ ✉) render double-width in some terminals (Windows conhost) and shift the line.
+ */
+export function activityText(a: Pick<LiveActivity, "kind" | "text">): string {
+  if (a.kind === "text") return a.text ? `“${a.text}”` : "writing…"
+  if (a.kind === "reasoning") return a.text ? `thinking: ${a.text}` : "thinking…"
+  if (a.kind === "waiting") return "waiting for the model"
+  return `» ${a.text}`
 }
 
 export function formatRunLine(s: RunSummary, now: number = Date.now()): string {
   const icon = STATUS_ICON[s.status] ?? "?"
   const lines = [
     `${icon} ${s.workflowName}  ${s.runId}  ${s.status}  ${formatDuration(elapsed(s, now))}  ` +
-      `agents ${s.agentCount}  tokens ${formatTokens(totalTokens(s.usage))}`,
+      `agents ${s.agentCount}  tokens ${formatTokens(totalTokens(s.usage))}${s.usage.cost > 0 ? `  ${formatCost(s.usage.cost)}` : ""}`,
   ]
   if (s.description) lines.push(`    ${s.description}`)
+  if (s.steeredAgents) lines.push(`    ✉ ${s.steeredAgents} agent${s.steeredAgents === 1 ? "" : "s"} steered`)
   // A meta.phases entry that ended with 0 agents is only noise once the run is over (P50).
   for (const p of s.phases) if (isActive(s) || p.agents > 0) lines.push(phaseLine(p))
   // Agents outside every phase group (P50). Older run.json files have no `ungrouped` field.
@@ -130,7 +185,11 @@ export function formatRunList(runs: RunSummary[], now: number = Date.now()): str
   const done = runs.filter((r) => !(r.status === "running" || r.status === "paused"))
   const out: string[] = [`Workflow runs (${runs.length}; ${active.length} active)`]
   for (const r of [...active, ...done]) out.push(formatRunLine(r, now))
-  out.push("", "Details: /workflows <runId>. Manage runs with the workflow_control tool (stop, stop_agent, pause, resume, save).")
+  out.push(
+    "",
+    "Details: /workflows <runId>. Message a running agent: /workflows msg <runId> <#n|@phase|*|label> <text>. " +
+      "Manage runs with the workflow_control tool (stop, stop_agent, pause, resume, message, save).",
+  )
   return out.join("\n")
 }
 
@@ -143,23 +202,47 @@ export function formatRunStatus(
   s: RunSummary,
   agents: AgentRecord[],
   now: number = Date.now(),
-  opts: { forModel?: boolean } = {},
+  opts: { forModel?: boolean; activity?: Map<number, LiveActivity> } = {},
 ): string {
   const out: string[] = [formatRunLine(s, now)]
   out.push(`    script: ${s.scriptPath}`, `    transcript: ${s.transcriptDir}`)
+  if (s.steeredAgents) {
+    out.push(
+      "    Steered agents are not reused on resume: they and every later agent run again with their original prompts " +
+        "(messages are not replayed). Edit the script to make a change stick.",
+    )
+  }
   if (s.error) out.push(`    error: ${firstLine(s.error)}`)
   for (const w of s.warnings ?? []) out.push(`    ! ${w}`)
   if (agents.length) {
     out.push("", "Agents:")
     for (const a of agents) {
       const dur = a.startedAt !== undefined ? `  ${formatDuration((a.endedAt ?? now) - a.startedAt)}` : ""
-      let line = `  #${a.index} ${a.label}  ${a.status}${a.phase ? `  [${a.phase}]` : ""}  ${formatTokens(totalTokens(a.usage))} tokens${dur}`
+      // X11: a running agent's live overlay (display only; the record keeps the settled usage).
+      const live = a.status === "running" ? opts.activity?.get(a.index) : undefined
+      const tokens = Math.max(totalTokens(a.usage), live?.tokens ?? 0)
+      let line = `  #${a.index} ${a.label}  ${a.status}${a.phase ? `  [${a.phase}]` : ""}  ${formatTokens(tokens)} tokens${dur}`
       if (a.sessionID) line += `  ${a.sessionID}`
       out.push(line)
+      const model = shownModel(a.model, live?.model)
+      if (model) out.push(`      model: ${model}`)
       out.push(`      prompt: ${clip(firstLine(a.prompt), 200)}`)
+      if (live) {
+        const ago = `  (${formatDuration(now - live.at)} ago)`
+        const cost = live.cost > 0 ? ` · ${formatCost(live.cost)}` : ""
+        out.push(`      now: ${activityText(live)}${ago}${cost}`)
+      }
       if (a.result !== undefined && !opts.forModel) out.push(`      result: ${clip(firstLine(resultText(a.result)), 200)}`)
       if (a.error) out.push(`      error: ${firstLine(a.error)}`)
       if (a.worktree) out.push(`      worktree kept: ${a.worktree}`)
+      if (a.messages?.length) {
+        const counts = new Map<string, number>()
+        for (const m of a.messages) counts.set(m.status, (counts.get(m.status) ?? 0) + 1)
+        out.push(`      messages: ${[...counts].map(([k, n]) => `${n} ${k}`).join(", ")}`)
+        for (const m of a.messages.slice(-3)) {
+          out.push(`      ✉ ${m.id} ${m.from}${m.urgent ? " (urgent)" : ""} [${m.status}]: ${clip(firstLine(m.text), 120)}`)
+        }
+      }
       for (const w of a.warnings ?? []) out.push(`      ! ${w}`)
     }
   }
@@ -173,6 +256,34 @@ export function formatRunStatus(
   } else if (s.status === "completed" && s.result !== undefined) {
     const text = resultText(s.result)
     out.push("", "Result:", text.length > 2000 ? `${text.slice(0, 2000)}…` : text)
+  }
+  return out.join("\n")
+}
+
+const REFUSAL_TEXT: Record<string, string> = {
+  finishing: "it is finishing its turn; try again in a moment, or stop it",
+  submitted: "it already submitted its structured result; a message can no longer change it",
+}
+
+/** Reply to a steering request (X01–X08): one line per targeted agent. */
+export function formatMessageReports(runId: string, reports: MessageReport[], opts: { urgent?: boolean; forModel?: boolean } = {}): string {
+  const out = [`Message to run ${runId}:`]
+  for (const r of reports) {
+    let what: string
+    if (r.outcome === "sent") what = `sent${opts.urgent ? " (urgent: its current step is interrupted)" : ""} (${r.messageId})`
+    else if (r.outcome === "held") what = `held (queued: added to its first prompt) (${r.messageId})`
+    else {
+      const detail = r.detail ?? (r.reason ? REFUSAL_TEXT[r.reason] : undefined)
+      what = `refused: ${r.reason ?? "unknown"}${detail ? ` (${detail})` : ""}`
+    }
+    out.push(`  #${r.index} ${r.label}  ${what}`)
+  }
+  if (reports.some((r) => r.outcome !== "refused")) {
+    const when = reports.some((r) => r.outcome === "sent") && opts.urgent
+      ? "It reads the message now; the interrupted step's tokens are not counted in its usage."
+      : "A running agent reads the message at its next step boundary (after its current step and tool calls finish)."
+    out.push(`${when} Steered agents are not reused on resume.`)
+    if (opts.forModel) out.push(`Its effect shows up in the run's result. ${AWAIT_NOTIFICATION}`)
   }
   return out.join("\n")
 }

@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { AgentRecord, JournalEntry, RunSummary } from "./types.ts"
+import type { AgentRecord, JournalEntry, JournalMessage, RunSummary } from "./types.ts"
 
 export const SCRIPT_FILE = "script.js"
 export const SUMMARY_FILE = "run.json"
@@ -143,13 +143,23 @@ export class RunStore {
     })
   }
 
-  async appendJournal(runId: string, entry: JournalEntry): Promise<void> {
+  /** Appends a result line, or a steering `message` line (X06; readJournal skips those). */
+  async appendJournal(runId: string, entry: JournalEntry | JournalMessage): Promise<void> {
     const line = JSON.stringify(entry) + "\n"
     await this.serialize(`${runId}:journal`, async () => appendFile(join(await this.runDir(runId), JOURNAL_FILE), line, "utf8"))
   }
 
   /** Journal entries in file (completion) order. Torn/invalid lines are skipped. [] when absent. */
   async readJournal(runId: string): Promise<JournalEntry[]> {
+    return (await this.readJournalLines(runId)).filter(isJournalEntry)
+  }
+
+  /** Steering message lines (X06), in file order. [] when absent. */
+  async readJournalMessages(runId: string): Promise<JournalMessage[]> {
+    return (await this.readJournalLines(runId)).filter(isJournalMessage)
+  }
+
+  private async readJournalLines(runId: string): Promise<unknown[]> {
     const loc = await this.findRun(runId)
     if (!loc) return []
     let text: string
@@ -159,16 +169,14 @@ export class RunStore {
       if (isNotFound(e)) return []
       throw e
     }
-    const out: JournalEntry[] = []
+    const out: unknown[] = []
     for (const line of text.split("\n")) {
       if (!line.trim()) continue
-      let v: unknown
       try {
-        v = JSON.parse(line)
+        out.push(JSON.parse(line))
       } catch {
-        continue
+        // torn line
       }
-      if (isJournalEntry(v)) out.push(v)
     }
     return out
   }
@@ -271,6 +279,12 @@ function isJournalEntry(v: unknown): v is JournalEntry {
     typeof e.key === "string" &&
     (e.status === "completed" || e.status === "failed" || e.status === "stopped")
   )
+}
+
+function isJournalMessage(v: unknown): v is JournalMessage {
+  if (!v || typeof v !== "object") return false
+  const e = v as Record<string, unknown>
+  return e.type === "message" && typeof e.index === "number" && typeof e.id === "string"
 }
 
 async function readJson<T>(path: string): Promise<T | undefined> {

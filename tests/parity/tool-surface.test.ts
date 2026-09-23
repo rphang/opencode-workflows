@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { isRunActive } from "../../src/engine.ts"
 import { FakeRunner, sleep } from "../helpers/fake-runner.ts"
-import { createHarness, script, SESSION, tag, type Harness } from "../helpers/plugin-harness.ts"
+import { createHarness, script, SESSION, tag, tctx, type Harness } from "../helpers/plugin-harness.ts"
 
 let h: Harness
 beforeEach(async () => {
@@ -243,6 +243,19 @@ describe("P06 completion notification", () => {
     expect(tag(text, "warnings")).toMatch(/plugin was unloaded/i)
     expect(text).toContain(`resumeFromRunId "${out.runId}"`)
     expect(isRunActive(out.runId!)).toBe(false)
+  })
+
+  test("P06 a workflow call that reaches an instance already disposed (plugin reload mid-turn) is refused, not started as an orphan run", async () => {
+    const runner = new FakeRunner()
+    const p = await h.setup({ runner })
+    const tool = p.tools().get("workflow")!
+    await p.cleanup!()
+    // The model's turn still holds the old instance's tool: calling it must not start a run that
+    // no live instance can see, stop or steer.
+    const out = JSON.parse((await tool.execute({ script: script(`return await agent("x")`) }, tctx())).content)
+    expect(out.error).toMatch(/reload/i)
+    expect(out.runId && isRunActive(out.runId)).toBeFalsy()
+    expect(runner.calls).toHaveLength(0)
   })
 
   test("P06 exactly one notification per run", async () => {
