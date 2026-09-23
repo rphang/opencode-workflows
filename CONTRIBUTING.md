@@ -111,8 +111,9 @@ the plugin API is young and each bump must be verified by hand:
    `## [Unreleased]` above it, and update the compare links at the bottom.
 4. Commit (`chore: release vx.y.z`), then tag and push: `git tag vx.y.z && git push origin main vx.y.z`.
 5. The `Release` workflow checks that the tag matches `package.json`, runs the type-check, tests and
-   build, publishes to npm with provenance (`npm publish --provenance --access public`, using the
-   `NPM_TOKEN` repository secret), and creates the GitHub Release with the notes from that
+   build, publishes to npm with provenance through npm trusted publishing (GitHub OIDC; no token
+   secret: the package's Trusted Publisher on npmjs.com is `rphang/opencode-workflows`,
+   `release.yml`), skips the publish if that version is already on npm, and creates the GitHub Release with the notes from that
    version's `CHANGELOG.md` section. Tags with a hyphen (for example `v0.2.0-rc.1`) are marked as
    prereleases.
 

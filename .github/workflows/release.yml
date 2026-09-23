@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write # create the GitHub Release
-      id-token: write # npm provenance
+      id-token: write # npm trusted publishing (OIDC) + provenance
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "24" # ships npm >= 11.5.1, required for trusted publishing
           cache: npm
           registry-url: "https://registry.npmjs.org"
 
@@ -69,10 +69,17 @@ jobs:
       - name: Pack (dry run)
         run: npm pack --dry-run
 
+      # Trusted publishing: npm verifies this repo + workflow through GitHub's OIDC token, so no
+      # NPM_TOKEN secret exists. Configure it once on npmjs.com: package settings > Trusted Publisher >
+      # GitHub Actions (owner rphang, repository opencode-workflows, workflow release.yml).
+      # A version that is already on npm (e.g. published by hand) is skipped so the Release still gets created.
       - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm view "$(node -p "require('./package.json').name")@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$VERSION is already on npm; skipping publish"
+          else
+            npm publish --provenance --access public
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
