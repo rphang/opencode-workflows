@@ -3,7 +3,7 @@
 // what the transcript dir holds, session-scoped run management and scriptPath read permissions.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { listWorkflows } from "../../src/registry.ts"
 import { FakeRunner } from "../helpers/fake-runner.ts"
@@ -179,6 +179,40 @@ describe("P76 scriptPath reads follow opencode's file permissions", () => {
     const p = await h.setup()
     const out = await p.call({ scriptPath: "linked/x.js" })
     expect(out.error).toMatch(/outside the project/)
+  })
+
+  // A path can have several spellings that resolve to the same place: a Windows 8.3 short name
+  // (C:\Users\RUNNER~1), macOS /var -> /private/var, a junction or symlinked directory. The user writes
+  // rules and paths with the spelling they see, so it must not matter which one reaches the plugin.
+  // A directory junction/symlink reproduces the alias portably.
+  const aliasOf = (dir: string) => {
+    const alias = `${dir}-alias`
+    symlinkSync(dir, alias, "junction")
+    return alias
+  }
+
+  test("P76 an external_directory rule spelled through a directory alias admits the outside path", async () => {
+    writeFileSync(join(h.base, "outside.js"), body("alias-ok"))
+    const alias = aliasOf(h.base)
+    try {
+      const p = await h.setup({ fake: { parent: { permissions: [{ action: "external_directory", resource: join(alias, "*"), effect: "allow" }] } } })
+      const out = await p.call({ scriptPath: join(alias, "outside.js") })
+      expect(out.error).toBeUndefined()
+      expect(p.resultOf(await p.notification(0))).toBe("alias-ok")
+    } finally {
+      rmSync(alias, { recursive: false, force: true })
+    }
+  })
+
+  test("P76 a missing file inside the project, reached through an alias, is reported as unreadable (not outside)", async () => {
+    const alias = aliasOf(h.base)
+    try {
+      const p = await h.setup()
+      const out = await p.call({ scriptPath: join(alias, "proj", "missing.js") })
+      expect(out.error).toMatch(/cannot read scriptPath/)
+    } finally {
+      rmSync(alias, { recursive: false, force: true })
+    }
   })
 
   test("P76 project files and the run's own script copy are accepted", async () => {

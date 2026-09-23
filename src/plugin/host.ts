@@ -4,7 +4,7 @@
 
 import { realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path"
 import { evaluatePermission, type PermissionRule } from "../opencode/permissions.ts"
 import {
   getActiveRun,
@@ -109,11 +109,23 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/**
+ * Canonical spelling of a path: symlinks, junctions, Windows 8.3 short names and macOS /var ->
+ * /private/var resolved. A path that does not exist (yet) is canonicalized through its nearest
+ * existing ancestor, so a missing file is still judged by where it would be.
+ */
 async function realpathOr(p: string): Promise<string> {
-  try {
-    return realpathSync.native(p)
-  } catch {
-    return p
+  const rest: string[] = []
+  let cur = p
+  for (;;) {
+    try {
+      return join(realpathSync.native(cur), ...rest)
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return p
+      rest.unshift(basename(cur))
+      cur = parent
+    }
   }
 }
 
@@ -334,17 +346,24 @@ export class WorkflowHost {
       rules = []
     }
     const slash = (p: string) => p.replaceAll("\\", "/")
+    // Rules are written with whatever spelling the user sees (8.3 short name, /var vs /private/var, a
+    // junction). The spelling given here counts too, but only when its directory is the SAME real
+    // directory: the file itself is never taken through a link to somewhere else.
+    const givenDir = dirname(abs)
+    const sameDir = contains(await realpathOr(givenDir), dirname(real)) && contains(dirname(real), await realpathOr(givenDir))
+    const dirSpellings = sameDir && givenDir !== dirname(real) ? [dirname(real), givenDir] : [dirname(real)]
+    const fileSpellings = dirSpellings.map((d) => join(d, basename(real)))
     if (!internalRoot && !isTrusted) {
-      const dirRule = slash(join(dirname(real), "*"))
-      if (evaluatePermission("external_directory", dirRule, rules) !== "allow") {
+      const allowed = dirSpellings.some((d) => evaluatePermission("external_directory", slash(join(d, "*")), rules) === "allow")
+      if (!allowed) {
         throw new Error(
           `scriptPath ${raw} is outside the project directory (${this.opts.cwd}) and opencode's external_directory ` +
             `permission does not allow ${dirname(real)}. Copy the script into the project, or allow that directory.`,
         )
       }
     }
-    const readResource = internalRoot ? slash(relative(internalRoot, real) || ".") : slash(real)
-    if (evaluatePermission("read", readResource, rules) === "deny") {
+    const readResources = internalRoot ? [slash(relative(internalRoot, real) || ".")] : fileSpellings.map(slash)
+    if (readResources.some((r) => evaluatePermission("read", r, rules) === "deny")) {
       throw new Error(`scriptPath ${raw} is denied by opencode's read permission`)
     }
     return abs
