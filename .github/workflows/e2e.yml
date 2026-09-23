@@ -1,0 +1,68 @@
+name: E2E (live)
+
+# Drives the real opencode CLI with real model calls (about $0.20 per run,
+# see docs/E2E.md). Manual or weekly only; never on pull requests, so forks
+# cannot spend the key.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Parent model (OPENCODE_E2E_MODEL)"
+        required: false
+        default: "openai/gpt-5.4-mini"
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Scheduled runs only on the upstream repo, not on forks.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'rphang/opencode-workflows'
+    env:
+      OPENCODE_E2E: "1"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENCODE_E2E_MODEL: ${{ inputs.model || 'openai/gpt-5.4-mini' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Check secret
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY secret is not set; the live suites would be skipped."
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # The harness isolates every opencode process under .sandbox/ (XDG_* dirs),
+      # so the runner's home is never used.
+      - name: Live e2e suite
+        run: npx bun test tests/e2e --timeout 600000
+
+      - name: Upload sandbox logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-sandbox-logs
+          path: |
+            .sandbox/*.log
+            .sandbox/e2e-costs.jsonl
+            .sandbox/e2e-data/opencode/workflows/
+          if-no-files-found: ignore
+          retention-days: 14

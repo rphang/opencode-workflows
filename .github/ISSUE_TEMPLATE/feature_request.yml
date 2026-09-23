@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new capability or a closer match to Claude Code's workflows.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should the plugin do? Include a sketch of the script API or tool input if relevant.
+    validations:
+      required: true
+  - type: input
+    id: parity
+    attributes:
+      label: Related PARITY ID
+      description: "If this is about Claude Code parity, the `docs/PARITY.md` ID (e.g. P50), or \"new\"."
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

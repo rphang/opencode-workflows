@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in the plugin does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please check `docs/PARITY.md` first: items marked DEGRADED or N/A
+        are known limitations of running as an opencode plugin.
+
+        **Remove secrets** (API keys, tokens, private code) from anything you paste below.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The prompt you gave, or the workflow script (inline, `scriptPath`, or saved workflow name).
+      render: markdown
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: "`@rphang/opencode-workflows` version, or the git commit if you run from a checkout."
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: opencode-version
+    attributes:
+      label: opencode version
+      description: "Output of `opencode --version`. The plugin is tested against 2.0.15 only."
+      placeholder: "2.0.15"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Parent model
+      description: "The model of the session that called `workflow` (and child models if different)."
+      placeholder: "openai/gpt-5.4-mini"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - npm package in opencode config
+        - Global loader file (~/.config/opencode/plugins)
+        - Project loader file (.opencode/plugins)
+        - Other
+  - type: textarea
+    id: run-data
+    attributes:
+      label: run.json / journal.jsonl excerpt
+      description: |
+        From the run's transcript dir (`transcriptDir` in the tool output, under
+        `<opencode data>/opencode/workflows/<sessionID>/<runId>/`). Paste `run.json` and the relevant
+        `journal.jsonl` lines, or the `/workflows <runId>` output.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from opencode's log (`<opencode data>/opencode/log/opencode.log`).
+      render: text

@@ -1,0 +1,88 @@
+{
+  "name": "@rphang/opencode-workflows",
+  "version": "0.1.0",
+  "description": "Claude Code-style dynamic workflows for opencode v2: the model writes a JS orchestration script that fans work out to parallel subagents (agent, parallel, pipeline, budget, resume)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "workflows",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test",
+    "test": "bun test tests/unit tests/parity",
+    "test:unit": "bun test tests/unit",
+    "test:parity": "bun test tests/parity",
+    "test:e2e": "bun test tests/e2e --timeout 600000",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "workflow",
+    "workflows",
+    "agents",
+    "subagents",
+    "multi-agent",
+    "orchestration",
+    "claude-code",
+    "ultracode"
+  ],
+  "author": "rphang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rphang/opencode-workflows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rphang/opencode-workflows/issues"
+  },
+  "homepage": "https://github.com/rphang/opencode-workflows#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "devDependencies": {
+    "@opencode/cli": "2.0.15",
+    "@opencode/plugin": "2.0.15",
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.2",
+    "bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@opencode/codemode": "2.0.15",
+    "acorn": "8.18.0",
+    "ajv": "8.20.0",
+    "effect": "4.0.0-rc.112"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.0.15"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "opencode": "2.0.15"
+  }
+}

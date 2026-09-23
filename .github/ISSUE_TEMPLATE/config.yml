@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/rphang/opencode-workflows/security/advisories/new
+    about: Report security issues privately. Do not open a public issue.
+  - name: Documentation and troubleshooting
+    url: https://github.com/rphang/opencode-workflows#troubleshooting
+    about: Check the README's install, usage and troubleshooting sections first.

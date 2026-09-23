@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # The plugin is pinned to one opencode release (engines.opencode, 2.0.15).
+      # @opencode/* bumps must be tested manually against the live CLI
+      # (e2e suite + parity review, see CONTRIBUTING.md "Testing against a new
+      # opencode version"), so Dependabot never proposes them.
+      - dependency-name: "@opencode/*"
+      # effect is pinned to the exact version @opencode/codemode 2.0.15 depends on:
+      # the plugin hands Effect values to codemode, so both must share one copy.
+      # It moves only together with @opencode/*.
+      - dependency-name: "effect"
+      # acorn and ajv are pinned (AGENTS.md); allow patch releases only.
+      - dependency-name: "acorn"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "ajv"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
