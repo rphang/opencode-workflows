@@ -722,6 +722,8 @@ export class WorkflowRun {
       this.nextIndex++
       const t = this.now()
       const record: AgentRecord = { index, key, label, phase, prompt, opts, status: "cached", usage: { ...cached.usage }, startedAt: t, endedAt: t }
+      if (ctx.name) record.workflow = ctx.name
+      if (this.opts.resume?.sourceRunId) record.cachedFrom = this.opts.resume.sourceRunId
       if (cached.sessionID) record.sessionID = cached.sessionID
       if (typeof cached.model === "string" && cached.model) record.model = cached.model
       record.result = cached.value === undefined ? null : cached.value
@@ -747,6 +749,7 @@ export class WorkflowRun {
 
     this.nextIndex++
     const record: AgentRecord = { index, key, label, phase, prompt, opts, status: "queued", usage: { ...ZERO_USAGE } }
+    if (ctx.name) record.workflow = ctx.name
     this.records[index] = record
     const liveAgent: LiveAgent = { record, controller: new AbortController(), userStopped: false, mailbox: undefined!, msgSeq: 0 }
     liveAgent.mailbox = new AgentMailbox({ onChange: () => this.onMailboxChange(liveAgent) })
@@ -900,7 +903,10 @@ export class WorkflowRun {
       record.status = "failed"
       record.error = outcome.error
       entry = { ...base, status: "failed", error: outcome.error, ...sid }
-      if (outcome.status === "schema_failed") thrown = new Error(outcome.error)
+      if (outcome.status === "schema_failed") {
+        thrown = new Error(outcome.error)
+        record.threw = true
+      }
     }
 
     if (!neverStarted || record.status === "failed") {

@@ -47,7 +47,7 @@ function resultText(value: unknown): string {
  * `<task-notification>` block; `<run-id>`, `<script-path>` and `<transcript-dir>` are extra so the
  * model can relaunch with `resumeFromRunId` / `scriptPath`.
  */
-export function formatTaskNotification(s: RunSummary, now: number = Date.now()): string {
+export function formatTaskNotification(s: RunSummary, now: number = Date.now(), agents?: AgentRecord[]): string {
   const verb = s.status === "completed" ? "completed" : s.status === "stopped" ? "was stopped" : "failed"
   let result: string
   if (s.status === "completed") result = resultText(s.result)
@@ -56,9 +56,10 @@ export function formatTaskNotification(s: RunSummary, now: number = Date.now()):
       "The run was stopped before it finished; there is no result. Completed agents are journaled: relaunch with " +
       `resumeFromRunId "${s.runId}" (same script or its scriptPath) to reuse them.`
   else
+    // No relaunch invitation: models relaunched failed runs unasked (docs/design/agent-output-access.md).
     result =
-      `Error: ${s.error ?? "unknown error"}\nFix the script at scriptPath and relaunch; pass resumeFromRunId ` +
-      `"${s.runId}" to reuse completed agents.`
+      `Error: ${errorText(s.error)}\nTo retry (only if the user asks for it): fix the script at scriptPath and relaunch ` +
+      `with resumeFromRunId "${s.runId}" to reuse completed agents.`
   const lines = [
     "<task-notification>",
     `<task-id>${s.taskId}</task-id>`,
@@ -77,30 +78,264 @@ export function formatTaskNotification(s: RunSummary, now: number = Date.now()):
         "Their results reflect those messages, which the script does not contain and a resume does not replay.</steering>",
     )
   }
+  // X20: which agents gave the script nothing (only when the records are known).
+  const failures = agents ? formatAgentFailures(s, agents) : undefined
+  if (failures) lines.push(`<agent-failures>${failures}</agent-failures>`)
   if (s.scriptPath) lines.push(`<script-path>${s.scriptPath}</script-path>`)
   if (s.transcriptDir) lines.push(`<transcript-dir>${s.transcriptDir}</transcript-dir>`)
+  // P79: where each agent's own return value is (Claude Code's wording, pointing at X21).
+  if (s.agentCount > 0) lines.push(`<diagnostics>${diagnosticsNote(s.runId)}</diagnostics>`)
   lines.push("</task-notification>")
   return lines.join("\n")
+}
+
+/** The run's error without the "Error: " prefix it may already carry (the result adds its own). */
+function errorText(error: string | undefined): string {
+  return (error ?? "").replace(/^(?:Error:\s*)+/, "") || "unknown error"
+}
+
+/**
+ * P79: Claude Code's per-agent diagnostics pointer, aimed at workflow_control `result` (X21) rather
+ * than at the transcript files: those are outside the project (an external_directory ask per read)
+ * and the read tool cuts journal.jsonl lines at 2000 characters.
+ */
+export function diagnosticsNote(runId: string): string {
+  return (
+    `Per-agent results: ${resultCall(runId)} lists every agent (failed ones first) with a preview of its return ` +
+    `value or error; add agent:"<index or label>" for one agent's full return value. If the result above is empty ` +
+    "or unexpected, check this BEFORE diagnosing — do not assume agents returned non-empty results. If you cannot " +
+    `use it, tell the user to open /workflows ${runId}; do not read the transcript files with shell commands.`
+  )
 }
 
 /** Told to the model instead of a result it must not read from a status call (P77). */
 export const AWAIT_NOTIFICATION =
   "The result is delivered to this session as a task notification — end your turn now; do not poll, sleep, or run shell commands to wait."
 
+/** Added to the P77 note from the 2nd status/result call on a run since it last changed state. */
+export const REPEAT_NOTE = "Repeating this call does not wait or speed anything up."
+
 /**
- * The P77 note that replaces the result in every model-facing status. A running/paused run: end the
- * turn. A finished run: the notification carries the result (whether the model has read it cannot be
- * known here: session.synthetic resolving only means it entered the inbox), and run.json keeps it.
+ * The P77 note that replaces the result in every model-facing status, and what workflow_control
+ * `result` returns while a run is going (X21). A running/paused run: end the turn. A finished run:
+ * the notification carries the result (whether the model has read it cannot be known here). It names
+ * no file and no other action: before the notification there is nothing new to call.
  */
-export function awaitNotificationNote(s: Pick<RunSummary, "status" | "transcriptDir">): string {
+export function awaitNotificationNote(s: Pick<RunSummary, "status"> & Partial<Pick<RunSummary, "transcriptDir">>): string {
   if (s.status === "running") return `Still running. ${AWAIT_NOTIFICATION}`
   if (s.status === "paused") return `Paused (still running). ${AWAIT_NOTIFICATION}`
-  const file = s.transcriptDir ? `${s.transcriptDir.replace(/[\\/]+$/, "")}/run.json` : "run.json in the transcript directory"
   return (
     "Finished. Its result is not shown here: it is delivered to this session as a task notification. " +
-    "If you have not received it yet, end your turn now; do not poll, sleep, or run shell commands to wait. " +
-    `The full result is also stored in ${file} (field "result").`
+    "If you have not received it yet, end your turn now; do not poll, sleep, or run shell commands to wait."
   )
+}
+
+// ---- per-agent results (X20, X21) -----------------------------------------------------------------
+
+/** Rows per page of the agent list (X21). */
+export const RESULT_LIST_LIMIT = 50
+/** Characters of one agent's return value per page (X21). */
+export const RESULT_OUTPUT_CHARS = 50_000
+/** Agents named in the notification's failure summary before "… and K more" (X20). */
+export const FAILURE_LINES = 10
+const FAILURE_LABEL_CHARS = 60
+const FAILURE_WORKFLOW_CHARS = 40
+const FAILURE_ERROR_CHARS = 160
+/**
+ * UTF-8 bytes the whole failure summary may use (X20). The per-line caps count characters, so ten
+ * worst-case lines (3-digit index, threw, nested workflow, multi-byte text) can exceed it; lines that
+ * would overflow are folded into "… and K more".
+ */
+export const FAILURE_BLOCK_BYTES = 2800
+
+/** True when agent() gave the script nothing: failed, stopped, unfinished, or a null value. */
+export function isNullAgent(a: Pick<AgentRecord, "status" | "result">): boolean {
+  if (a.status === "completed" || a.status === "cached") return a.result === null || a.result === undefined
+  return true
+}
+
+/** The kinds of "no result", in the order the views list them. */
+type NullKind = "failed" | "stopped" | "null" | "running"
+
+function nullKind(a: AgentRecord): NullKind | undefined {
+  if (!isNullAgent(a)) return undefined
+  if (a.status === "failed" || a.status === "stopped") return a.status
+  if (a.status === "completed" || a.status === "cached") return "null"
+  return "running" // queued or running when the run ended
+}
+
+const KIND_ORDER: Record<NullKind, number> = { failed: 0, stopped: 1, null: 2, running: 3 }
+
+function resultCall(runId: string): string {
+  return `workflow_control {action:"result", runId:"${runId}"}`
+}
+
+/** Whitespace (newlines included) folded to single spaces. */
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim()
+}
+
+/** The first line of `s`, folded and clipped. */
+function headLine(s: string, n: number): string {
+  const i = s.indexOf("\n")
+  return clip(oneLine(i < 0 ? s : s.slice(0, i)), n)
+}
+
+/**
+ * The notification's failure summary (X20): every agent whose agent() call gave the script nothing
+ * (failed, stopped, still queued/running when the run ended, or a null value), at most FAILURE_LINES
+ * of them, one clipped line each, within FAILURE_BLOCK_BYTES of UTF-8 (lines that would overflow join
+ * "… and K more"), so even a 1000-agent run stays under 3 KB. A failed run with none says
+ * the script raised the error. Undefined when there is nothing to report.
+ */
+export function formatAgentFailures(s: Pick<RunSummary, "runId" | "status">, agents: AgentRecord[]): string | undefined {
+  const bad = agents.filter((a) => a && isNullAgent(a))
+  if (!bad.length) {
+    if (s.status !== "failed") return undefined
+    return (
+      "No agent failed: the error above was raised by the script itself (this includes agent() calls refused before " +
+      "an agent started: budget, agent cap, invalid options/schema)."
+    )
+  }
+  const n: Record<NullKind, number> = { failed: 0, stopped: 0, null: 0, running: 0 }
+  for (const a of bad) n[nullKind(a)!]++
+  const counts = `${n.failed} failed, ${n.stopped} stopped, ${n.null} null${n.running ? `, ${n.running} running` : ""}`
+  const out = [`${bad.length} of ${agents.length} agents returned no result (${counts}):`]
+  const more = (k: number) => `… and ${k} more: ${resultCall(s.runId)} lists failed agents first.`
+  const bytes = (t: string) => Buffer.byteLength(t, "utf8") + 1 // + the joining newline
+  let used = bytes(out[0]!)
+  for (const a of bad.slice(0, FAILURE_LINES)) {
+    let line = `#${a.index} "${clip(oneLine(a.label), FAILURE_LABEL_CHARS)}" ${a.status}`
+    if (a.threw) line += " (agent() threw)"
+    if (a.workflow) line += ` in workflow "${clip(oneLine(a.workflow), FAILURE_WORKFLOW_CHARS)}"`
+    if (a.error) line += `: ${headLine(a.error, FAILURE_ERROR_CHARS)}`
+    else if (nullKind(a) === "null") line += ": returned null"
+    // Keep room for the footer the remaining agents would need; always name at least one agent.
+    const rest = bad.length - (out.length - 1) - 1
+    const need = bytes(line) + (rest ? bytes(more(rest)) : 0)
+    if (out.length > 1 && used + need > FAILURE_BLOCK_BYTES) break
+    out.push(line)
+    used += bytes(line)
+  }
+  const shown = out.length - 1
+  if (bad.length > shown) out.push(more(bad.length - shown))
+  return out.join("\n")
+}
+
+/** "a completed, b cached, c failed, d stopped, e null[, f running]" (completed/cached: with a value). */
+function agentCounts(agents: AgentRecord[]): string {
+  const n = { completed: 0, cached: 0, failed: 0, stopped: 0, null: 0, running: 0 }
+  for (const a of agents) {
+    const k = nullKind(a)
+    if (k) n[k]++
+    else n[a.status as "completed" | "cached"]++
+  }
+  return (
+    `${n.completed} completed, ${n.cached} cached, ${n.failed} failed, ${n.stopped} stopped, ${n.null} null` +
+    (n.running ? `, ${n.running} running` : "")
+  )
+}
+
+/** Agents in list order (X21): failed, stopped, null, unfinished, then the rest; by index within each. */
+function listOrder(agents: AgentRecord[]): AgentRecord[] {
+  const rank = (a: AgentRecord) => {
+    const k = nullKind(a)
+    return k ? KIND_ORDER[k] : 4
+  }
+  return [...agents].sort((a, b) => rank(a) - rank(b) || a.index - b.index)
+}
+
+/** One agent as a list row: status, phase, nested workflow, tokens, then a preview or the error. */
+function agentRow(a: AgentRecord): string {
+  let row = `#${a.index} "${clip(oneLine(a.label), 60)}" ${a.status}`
+  if (a.phase) row += ` [${clip(oneLine(a.phase), 40)}]`
+  if (a.workflow) row += ` (workflow ${clip(oneLine(a.workflow), 40)})`
+  row += ` ${formatTokens(totalTokens(a.usage))} tokens`
+  if (a.error) row += ` error: ${headLine(a.error, 120)}`
+  else if (a.result === null || a.result === undefined) row += " → null"
+  else row += ` → ${headLine(resultText(a.result), 100)}`
+  return row
+}
+
+/**
+ * workflow_control `result` without `agent` (X21): the run's agents, one row each, failed ones first,
+ * RESULT_LIST_LIMIT rows per page (`offset` = first row), so a 1000-agent run stays bounded.
+ */
+export function formatAgentList(s: Pick<RunSummary, "runId" | "status">, agents: AgentRecord[], offset = 0): string {
+  const out = [`Run ${s.runId} ${s.status}: ${agents.length} agents: ${agentCounts(agents)}`]
+  if (!agents.length) return [...out, "The run started no agents."].join("\n")
+  const rows = listOrder(agents)
+  const start = Math.min(Math.max(0, Math.floor(offset)), rows.length)
+  const page = rows.slice(start, start + RESULT_LIST_LIMIT)
+  const end = start + page.length
+  for (const a of page) out.push(agentRow(a))
+  if (start > 0 || end < rows.length) {
+    out.push(
+      `Rows ${page.length ? start + 1 : start}–${end} of ${rows.length}.` +
+        (end < rows.length ? ` Next: {action:"result", runId:"${s.runId}", offset:${end}}` : ""),
+    )
+  }
+  out.push(`One agent's full return value: {action:"result", runId:"${s.runId}", agent:"<index or label>"}`)
+  return out.join("\n")
+}
+
+/** Why agent() gave the script nothing, for the detail view (X21). */
+function nullReason(a: AgentRecord): string {
+  const k = nullKind(a)
+  if (k === "null") return "its value was null"
+  if (k === "running") return "it had not finished when the run ended"
+  if (a.error) return `${a.status}: ${headLine(a.error, FAILURE_ERROR_CHARS)}`
+  return k === "stopped" ? "stopped with the run" : String(a.status)
+}
+
+/**
+ * workflow_control `result` for one agent (X21): its details and its full return value (a string as
+ * is, anything else as indented JSON), RESULT_OUTPUT_CHARS characters per page (`offset` = first char).
+ */
+export function formatAgentDetail(
+  s: Pick<RunSummary, "runId">,
+  a: AgentRecord,
+  opts: { offset?: number; total?: number; note?: string } = {},
+): string {
+  const out = [`Agent #${a.index} "${a.label}" of run ${s.runId}: ${a.status}`]
+  if (opts.note) out.push(opts.note)
+  if (a.phase) out.push(`phase: ${a.phase}`)
+  if (a.workflow) out.push(`workflow: ${a.workflow} (started by workflow() in the script)`)
+  if (a.status === "cached") out.push(`cached: replayed from run ${a.cachedFrom ?? "(the resumed run)"}; did not run again`)
+  if (a.model) out.push(`model: ${a.model}`)
+  if (a.sessionID) out.push(`session: ${a.sessionID}`)
+  const u = a.usage
+  out.push(
+    `usage: ${formatTokens(totalTokens(u))} tokens (input ${u.input}, output ${u.output}, reasoning ${u.reasoning}, ` +
+      `cache ${u.cacheRead}/${u.cacheWrite})${u.cost > 0 ? `, ${formatCost(u.cost)}` : ""}`,
+  )
+  if (a.startedAt !== undefined && a.endedAt !== undefined) out.push(`duration: ${formatDuration(a.endedAt - a.startedAt)}`)
+  out.push(`prompt: ${clip(a.prompt, 500)}`)
+  if (a.error) out.push(`error: ${a.error}`)
+  for (const w of a.warnings ?? []) out.push(`warning: ${w}`)
+  if (a.messages?.length) {
+    const shown = a.messages.slice(-5)
+    const more = a.messages.length - shown.length
+    out.push(`steering messages: ${a.messages.length}${more ? ` (the last ${shown.length})` : ""}; its return value reflects them`)
+    for (const m of shown) out.push(`  ✉ ${m.from}${m.urgent ? " (urgent)" : ""} [${m.status}]: ${clip(m.text, 500)}`)
+  }
+  if (a.worktree) out.push(`worktree kept: ${a.worktree}`)
+  const tail = `Omit agent to list all ${opts.total ?? a.index + 1} agents.`
+  if (isNullAgent(a)) {
+    out.push(a.threw ? `agent() threw in the script (${nullReason(a)})` : `agent() returned null to the script (${nullReason(a)})`)
+    return [...out, tail].join("\n")
+  }
+  const text = resultText(a.result)
+  const kind = typeof a.result === "string" ? "text" : "JSON"
+  const start = Math.min(Math.max(0, Math.floor(opts.offset ?? 0)), text.length)
+  const end = Math.min(text.length, start + RESULT_OUTPUT_CHARS)
+  if (start === 0 && end === text.length) {
+    out.push(`Return value (${kind}, ${text.length} chars):`, text)
+  } else {
+    out.push(`Return value (${kind}):`, text.slice(start, end))
+    out.push(`chars ${start}–${end} of ${text.length}${end < text.length ? `; next offset ${end}` : ""}`)
+  }
+  return [...out, tail].join("\n")
 }
 
 function isActive(s: Pick<RunSummary, "status">): boolean {

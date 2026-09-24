@@ -25,10 +25,14 @@ import { MAX_MESSAGE_CHARS, type MessageFrom, type MessageVia } from "../mailbox
 import type { AgentRecord, AgentRunner, Json, MessageTarget, RunSummary, WorkflowInput, WorkflowOutput } from "../types.ts"
 import {
   AWAIT_NOTIFICATION,
+  awaitNotificationNote,
+  formatAgentDetail,
+  formatAgentList,
   formatMessageReports,
   formatRunList,
   formatRunStatus,
   formatTaskNotification,
+  REPEAT_NOTE,
   type LiveActivity,
 } from "./format.ts"
 
@@ -38,7 +42,7 @@ export interface WorkflowToolInput extends WorkflowInput {
 }
 
 export interface ControlInput {
-  action: "list" | "status" | "stop" | "stop_agent" | "pause" | "resume" | "message" | "save"
+  action: "list" | "status" | "stop" | "stop_agent" | "pause" | "resume" | "message" | "save" | "result"
   runId?: string
   agentIndex?: number
   name?: string
@@ -51,6 +55,10 @@ export interface ControlInput {
   text?: string
   /** message: also interrupt the agent's current step (X08). */
   urgent?: boolean
+  /** result: one agent, by index ("3" or "#3") or exact label; omitted or "" lists them all (X21). */
+  agent?: string
+  /** result: where the next page starts: a row of the list, or a character of one agent's value (X21). */
+  offset?: number
 }
 
 /** One steering request, from any surface (tool, command, TUI). */
@@ -158,10 +166,10 @@ export function launchSummary(name: string, description: string, runId: string, 
   )
 }
 
-const CONTROL_RUN_ACTIONS = ["status", "stop", "stop_agent", "pause", "resume", "message", "save"] as const
+const CONTROL_RUN_ACTIONS = ["status", "stop", "stop_agent", "pause", "resume", "message", "save", "result"] as const
 const USER_ACTIONS = ["stop", "stop_agent", "pause", "resume", "message"] as const
 type UserAction = (typeof USER_ACTIONS)[number]
-const ACTION_LIST = "list, status, stop, stop_agent, pause, resume, message or save"
+const ACTION_LIST = "list, status, stop, stop_agent, pause, resume, message, save or result"
 
 function notInSession(runId: string): string {
   return `run ${runId} was not found in this session`
@@ -205,6 +213,8 @@ function nonEmpty(v: unknown): v is string {
 export class WorkflowHost {
   private readonly runs = new Map<string, { run: WorkflowRun; sessionID: string; notified: Promise<void> }>()
   private readonly finished = new Map<string, RunSnapshot>()
+  /** P77: model-facing progress calls per (session, run) since the run last changed state. */
+  private readonly progressCalls = new Map<string, { status: string; calls: number }>()
   private disposed = false
   private keepAliveTimer: ReturnType<typeof setInterval> | undefined
   private readonly now: () => number
@@ -338,7 +348,7 @@ export class WorkflowHost {
     } catch (e) {
       return fail(`could not start the run: ${errMsg(e)}`)
     }
-    const notified = run.result().then((summary) => this.deliver(sessionID, summary))
+    const notified = run.result().then((summary) => this.deliver(sessionID, summary, run.agents()))
     this.runs.set(runId, { run, sessionID, notified })
     this.startKeepAlive()
     void run.settled().finally(() => {
@@ -440,11 +450,11 @@ export class WorkflowHost {
     return abs
   }
 
-  private async deliver(sessionID: string, summary: RunSummary): Promise<void> {
+  private async deliver(sessionID: string, summary: RunSummary, agents: AgentRecord[]): Promise<void> {
     try {
       await this.opts.notify({
         sessionID,
-        text: formatTaskNotification(summary, this.now()),
+        text: formatTaskNotification(summary, this.now(), agents),
         description: `Workflow ${summary.workflowName} ${summary.status}`,
         metadata: { workflowRunId: summary.runId, workflowTaskId: summary.taskId, status: summary.status },
         delivery: NOTIFY_DELIVERY,
@@ -521,24 +531,104 @@ export class WorkflowHost {
     if (!(await this.ownsRun(runId, sessionID))) return notInSession(runId)
     const view = { forModel: !!opts.forModel }
     const live = getActiveRun(runId)
+    let text: string
+    let status: string
     if (live) {
       const s = live.summary()
       const activity = this.activityOf(runId)
       // P77: what an agent is writing or thinking is a partial result; the model sees only that it is.
-      return formatRunStatus(s, live.agents(), this.now(), { ...view, activity: view.forModel ? withoutText(activity) : activity })
+      text = formatRunStatus(s, live.agents(), this.now(), { ...view, activity: view.forModel ? withoutText(activity) : activity })
+      status = s.status
+    } else {
+      const stored = await this.opts.store.readSummary(runId)
+      if (!stored) return `unknown run: ${runId}`
+      const summary = reconcileStored(stored)
+      // No engine owns this run: an agent still marked queued/running on disk was cut off with it.
+      text = formatRunStatus(summary, await this.storedAgents(runId, summary, summary !== stored), this.now(), view)
+      status = summary.status
     }
+    return view.forModel ? text + this.repeatNote(sessionID, runId, status) : text
+  }
+
+  /**
+   * P77: " Repeating this call does not wait…" from the 2nd model-facing status/result call on the same
+   * (session, run) since the run last changed state; "" otherwise.
+   */
+  private repeatNote(sessionID: string, runId: string, status: string): string {
+    const key = `${sessionID}\n${runId}`
+    const prev = this.progressCalls.get(key)
+    const calls = prev && prev.status === status ? prev.calls + 1 : 1
+    this.progressCalls.delete(key)
+    this.progressCalls.set(key, { status, calls })
+    while (this.progressCalls.size > 500) this.progressCalls.delete(this.progressCalls.keys().next().value!)
+    return calls > 1 ? ` ${REPEAT_NOTE}` : ""
+  }
+
+  /**
+   * workflow_control `result` (X21): what each agent of a FINISHED run returned: the list (failed
+   * agents first, paged) or, with `agent` (index "3"/"#3", else an exact label), one agent's details
+   * and full return value (paged by characters). A running or paused run gets the status note (P77),
+   * so a polling model learns nothing new. Caller checked ownership (P75).
+   */
+  private async resultText(runId: string, sessionID: string, input: ControlInput): Promise<string> {
+    const run = await this.loadRun(runId)
+    if (!run) return `unknown run: ${runId}`
+    const { summary } = run
+    if (summary.status === "running" || summary.status === "paused") {
+      return awaitNotificationNote(summary) + this.repeatNote(sessionID, runId, summary.status)
+    }
+    const agents = run.agents ?? (await this.storedAgents(runId, summary, false))
+    const offset = toOffset(input.offset)
+    const sel = input.agent === undefined || input.agent === null ? "" : String(input.agent).trim()
+    if (!sel) return formatAgentList(summary, agents, offset)
+
+    const total = agents.length
+    const byIndex = /^#?(\d+)$/.exec(sel)
+    if (byIndex) {
+      const a = agents.find((x) => x.index === Number(byIndex[1]))
+      if (a) {
+        const other = agents.find((x) => x.index !== a.index && x.label.trim() === sel)
+        const note = other
+          ? `Note: agent:"${sel}" is read as index #${a.index}; agent #${other.index} has the label "${sel}" (pass agent:"#${other.index}" for it).`
+          : undefined
+        return formatAgentDetail(summary, a, { offset, total, note })
+      }
+    }
+    const hits = agents.filter((x) => x.label.trim() === sel)
+    if (hits.length === 1) return formatAgentDetail(summary, hits[0]!, { offset, total })
+    if (hits.length > 1) {
+      const shown = hits.slice(0, 20).map((x) => `#${x.index} ${x.status}`).join(", ")
+      return (
+        `Label "${sel}" matches ${hits.length} agents in run ${runId}: ${shown}${hits.length > 20 ? ", …" : ""}. ` +
+        `Pass agent:"#<index>" for one of them.`
+      )
+    }
+    return (
+      `No agent "${sel}" in run ${runId}: it has ${total} agent${total === 1 ? "" : "s"}${total ? ` (#0–#${total - 1})` : ""}. ` +
+      `Pass an index ("3" or "#3") or an exact label, or omit agent to list them.`
+    )
+  }
+
+  /** A run with its agents: live, finished in this instance, or from disk (any Location). */
+  private async loadRun(runId: string): Promise<RunSnapshot | undefined> {
+    const live = getActiveRun(runId)
+    if (live) return { summary: live.summary(), agents: live.agents() }
+    const mem = this.snapshot(runId)
+    if (mem) return mem
     const stored = await this.opts.store.readSummary(runId)
-    if (!stored) return `unknown run: ${runId}`
+    if (!stored) return undefined
     const summary = reconcileStored(stored)
-    // No engine owns this run: an agent still marked queued/running on disk was cut off with it.
-    const orphaned = summary !== stored
+    return { summary, agents: await this.storedAgents(runId, summary, summary !== stored) }
+  }
+
+  /** A stored run's agent records; with `orphaned`, agents still queued/running on disk show as stopped. */
+  private async storedAgents(runId: string, summary: RunSummary, orphaned: boolean): Promise<AgentRecord[]> {
     const agents: AgentRecord[] = []
     for (let i = 0; i < summary.agentCount; i++) {
       const r = await this.opts.store.readAgentRecord(runId, i)
-      if (!r) continue
-      agents.push(orphaned && (r.status === "running" || r.status === "queued") ? { ...r, status: "stopped" } : r)
+      if (r) agents.push(orphaned && (r.status === "running" || r.status === "queued") ? { ...r, status: "stopped" } : r)
     }
-    return formatRunStatus(summary, agents, this.now(), view)
+    return agents
   }
 
   async control(input: ControlInput, sessionID: string): Promise<string> {
@@ -556,6 +646,8 @@ export class WorkflowHost {
         return this.statusText(runId, sessionID, { forModel: true })
       case "save":
         return this.save(runId, input)
+      case "result":
+        return this.resultText(runId, sessionID, input)
       case "stop":
       case "stop_agent":
       case "pause":
@@ -859,4 +951,10 @@ export function reconcileStored(s: RunSummary): RunSummary {
   if ((s.status !== "running" && s.status !== "paused") || isRunActive(s.runId)) return s
   const note = `interrupted: the opencode process exited while this run was ${s.status}; relaunch with resumeFromRunId "${s.runId}" to continue`
   return { ...s, status: "stopped", warnings: [...(s.warnings ?? []), note] }
+}
+
+/** workflow_control `offset` (X21): a non-negative integer; a numeric string counts; anything else is 0. */
+function toOffset(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : 0
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }

@@ -13,7 +13,10 @@ Without `OPENCODE_E2E=1` (or without `OPENAI_API_KEY`), the live suites are skip
 offline `harness.test.ts` runs. The opt-in exists because a bare `bun test` at the repo root would
 otherwise pick these files up and spend money.
 
-Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.4-mini`).
+Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.4-mini`). With a free
+`opencode/*` model (for example `opencode/space-bunny-free` or `opencode/nemotron-3-ultra-free`;
+children default to a free model too) no provider key is used, but `OPENAI_API_KEY` must still be
+set to enable the suites (`OPENAI_API_KEY=unused`).
 `OPENCODE_E2E_BIN` sets the CLI binary.
 
 ## How the harness works (`tests/e2e/harness.ts`)
@@ -101,6 +104,21 @@ Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.
    window handle (never SendKeys to whatever window has focus), PrintWindow screenshots, and close
    only the processes you started.
 
+10. **A permission ask blocks a headless `serve` turn.** With no client attached, nobody answers a
+   permission request. In the per-agent-outputs eval (`docs/design/agent-output-access.md`), a turn
+   woken by a task notification read the run's `journal.jsonl`. That raised an `external_directory`
+   ask (the data dir is outside the project), and the turn sat on it for the whole 150 s test. The
+   plugin now points the model at `workflow_control` `result` instead of the files. A test that
+   expects file reads must answer asks through `GET /api/session/<id>/permission` and
+   `POST …/permission/<requestId>/reply`, or set a rule for the data dir in the project's
+   `opencode.json`.
+11. **Model habits seen with free models, independent of the plugin** (also in the C0 baseline):
+   `opencode/nemotron-3-ultra-free` sometimes relaunches a failed run without being asked (the
+   failed-run `<result>` now says to retry only if the user asks, which reduces it), sometimes sends
+   `args` as a JSON string instead of an object, and sometimes polls `workflow_control status` while a
+   run is going (from the 2nd call the note says repeating does not help). `opencode/space-bunny-free`
+   fills in every field of a tool schema, which is why `result` has only `agent` and `offset`.
+
 ## TUI live check (manual, X12–X16)
 
 The live progress tree has no automated live test (a TUI needs a console). The recipe used for
@@ -159,6 +177,7 @@ console size). Seen: the rows showed `opencode/space-bunny-free#low` and the oth
 | `stop.test.ts` | `workflow_control stop_agent` on a streaming agent: its `agent()` returns `null` (`log first=null`) and it is journaled `failed` / "stopped by user". The next agent starts; `workflow_control stop` then gives a notification with status `stopped` and a resume hint, the journal shows that agent as `stopped` (not failed), and both child sessions have outcome `interrupted`. | P51 P44 |
 | `commands.test.ts` | No model calls. `/workflow-authoring` and `/workflows` post synthetic text (API reference; "No workflow runs") without starting an assistant turn. With `OPENCODE_DISABLE_WORKFLOWS=1`, the plugin is active but registers no workflow commands. | P58 P50 P57 P54 |
 | `steer.test.ts` | A second project plugin adds a 3-second `slow_step` tool. The child is told to call it four times; during the first call `/workflows msg <runId> 0 …` (through `POST /api/session/:id/command`) replies `#0 stepper sent`. The result is the steered answer, the child made fewer than 4 calls, its context holds the `<orchestrator-message>` before that answer, `agents/0.json` shows the message `delivered`, the journal has the `message` line and `steered:true`. Relaunching with `resumeFromRunId` runs agent 0 live (new session, original answer). A last case sends the message as the final step starts: it is either answered (that reply is the result) or refused (`finishing`/`finished`), and the child's last reply is always the result. | X01 X03 X06 P41 |
+| `results.test.ts` | Two cases. (1) Two agents, empty result: the notification has `<diagnostics>` with `workflow_control {action:"result", runId:"…"}`, and in a later turn the parent is asked to call `{"action":"result","runId":…,"agent":"beta"}`. The child prompts spell the markers out ("the word BETA, then a hyphen, then the number 5512") so the marker in an output can only come from the return value; the detail view prints the prompt. The test accepts either path and logs which one ran: with `agent`, the detail (`Agent #1 "beta" of run …` and `Return value (text, …)` then `BETA-5512`); without it, the list, whose `#1 "beta" completed … → BETA-5512` preview row must show the value. Observed with `opencode/space-bunny-free`: one run dropped `agent`, filled `agentIndex:0`, `offset:0` and `location:"project"` instead, and got the list (only the list path ran). A later run sent `agent:"beta"` and got the detail view with `BETA-5512`. The detail path is always covered by `tests/parity/results.test.ts`. (2) A partial failure, in natural language ("ultracode… tell me which regions were confirmed… Do not relaunch"): 2 of 4 agents fail at once (unknown `agentType`). The notification has `<agent-failures>2 of 4 agents returned no result`; the parent makes at most 3 `workflow_control` calls before the notification, reads no transcript file, relaunches nothing, and its reply names both failed regions. Passed live with the free parents `opencode/nemotron-3-ultra-free` (twice) and `opencode/space-bunny-free`: 0 `workflow_control` calls before the notification and 0 tool calls after it in every run, with the right reason given ("unknown agent type `no-such-agent`"). | X21 X20 P79 P77 |
 
 ## Results and costs
 
@@ -215,6 +234,13 @@ Full runs on 2026-09-23 (Windows 11, opencode 2.0.15, parent and children on
   the way Claude Code's is. P50 remains DEGRADED.
 - P06 is confirmed live: `delivery:"queue", resume:true` wakes the idle parent, and the model
   answers the `<task-notification>`.
+- **Per-agent outputs** (P79, X20, X21): the parent reads them with `workflow_control` `result`, not
+  from the transcript files, so no `external_directory` ask is raised (gotcha 10). Open items:
+  - the notification's `<result>` is not clipped (a 114 KB result, about 50k tokens, was seen);
+  - a refused `agent()` call leaves no record (X20);
+  - a model can read a finished run's agents before its notification arrives and report twice (P77);
+  - the full re-evaluation listed in `docs/design/agent-output-access.md` ("Before merging") has not
+    been run yet.
 
 ## Demo transcript
 

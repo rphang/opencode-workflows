@@ -41,7 +41,7 @@ export const WORKFLOW_INPUT_SCHEMA = {
   },
 } as const
 
-export const CONTROL_ACTIONS = ["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save"] as const
+export const CONTROL_ACTIONS = ["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save", "result"] as const
 
 export const CONTROL_INPUT_SCHEMA = {
   type: "object",
@@ -61,6 +61,16 @@ export const CONTROL_INPUT_SCHEMA = {
       type: "boolean",
       description:
         "message: also interrupt the agent's current step so it reads the message right away (that step's tokens are lost). Default false.",
+    },
+    agent: {
+      type: "string",
+      maxLength: 200,
+      description: 'result: one agent, by index ("3" or "#3") or exact label, for its full return value. Omit it (or "") to list every agent.',
+    },
+    offset: {
+      type: "integer",
+      minimum: 0,
+      description: "result: where the next page starts; use the value the previous page's footer gives. Default 0.",
     },
     name: { type: "string", description: "save: file name for the saved script (default: meta.name)." },
     location: {
@@ -83,8 +93,11 @@ export const CONTROL_TOOL_DESCRIPTION =
   "(stop one agent; it counts as failed and its agent() call returns null), pause / resume (stop / restart " +
   "scheduling new agents), message (send an instruction to a running agent of your run without restarting it; it is " +
   "read at the agent's next step boundary; a queued agent gets it with its first prompt), save (save a run's script " +
-  "as a reusable /<name> command in the project or personal workflows directory). Only use stop/stop_agent/pause/" +
-  "save when the user asks for it, and message only when the user asks you to redirect agents."
+  "as a reusable /<name> command in the project or personal workflows directory), result (what each agent of a " +
+  "finished run returned, for after its task notification: every agent, failed ones first, with a preview or its " +
+  `error; agent:"<index or label>" for one agent's full return value; offset for the next page. While the run is ` +
+  "going it only repeats the status note). " +
+  "Only use stop/stop_agent/pause/save when the user asks for it, and message only when the user asks you to redirect agents."
 
 function text(content: string) {
   return { content }

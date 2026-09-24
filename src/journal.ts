@@ -57,6 +57,8 @@ export class ReplayCursor {
   constructor(
     entries: readonly JournalEntry[],
     private readonly steered: ReadonlySet<number> = new Set(),
+    /** The run the entries come from (shown on cached agents, X21). */
+    readonly sourceRunId?: string,
   ) {
     for (const e of entries) this.byIndex.set(e.index, e) // last line for an index wins
   }
@@ -105,5 +107,5 @@ export async function loadForResume(store: RunStore, runId: string): Promise<Res
     const rec = await store.readAgentRecord(runId, e.index).catch(() => undefined)
     if (rec && rec.key === e.key && typeof rec.model === "string" && rec.model) e.model = rec.model
   }
-  return { runId, summary, entries, steered, cursor: new ReplayCursor(entries, steered) }
+  return { runId, summary, entries, steered, cursor: new ReplayCursor(entries, steered, runId) }
 }

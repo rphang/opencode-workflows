@@ -105,6 +105,12 @@ export interface AgentRecord {
   result?: Json
   /** Steering messages this agent received (X01–X04), oldest first. */
   messages?: MessageRecord[]
+  /** meta.name of the nested workflow() that started this agent (X20, X21); absent for the top-level script. */
+  workflow?: string
+  /** agent() threw instead of resolving: a schema agent whose output never validated (P21, X20). */
+  threw?: boolean
+  /** A cached agent (P41): the run whose journal it was replayed from (X21). */
+  cachedFrom?: string
 }
 
 /** One line of journal.jsonl. */

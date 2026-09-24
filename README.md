@@ -91,6 +91,9 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 - **Bundled `/deep-research`**: plans research angles, runs web researchers, has 3 skeptics
   cross-check each claim, and writes a Markdown report with citations.
 - **`/workflows`** progress view and a **`workflow_control`** tool to list, stop, pause, resume and save runs.
+- **Per-agent outputs (extension).** The notification names the agents that returned nothing, and
+  once a run has finished the model can read what each agent returned (`workflow_control` `result`),
+  without touching files.
 - **Steering (extension).** Send an instruction to a running agent without restarting it:
   `/workflows msg <runId> <agent> <text>`, or ask the model. The agent reads it at its next step.
 - **Live progress tree (extension, TUI).** `ctrl+x o` opens a live tree of the session's runs:
@@ -103,10 +106,10 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
   the agent gets a warning.
 - **Safe by default.** Workflows start only when you opt in. Scripts run in a sandbox with no
   filesystem, network or shell. Agents inherit your permission rules and never get more.
-- **Tested for parity.** 59 behaviors are each tracked against Claude Code in
-  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test. The 19 extensions beyond
-  Claude Code (`X01`–`X19`: steering, the live progress tree, per-agent models) are specified and
-  tested there the same way.
+- **Tested for parity.** 60 behaviors are each tracked against Claude Code in
+  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test. The 21 extensions beyond
+  Claude Code (`X01`–`X21`: steering, the live progress tree, per-agent models, the per-agent
+  failure summary and outputs) are specified and tested there the same way.
 
 ## Requirements
 
@@ -219,6 +222,13 @@ but the command exits after the launch turn, so the final answer never reaches y
 the session in the TUI, or run `opencode run -c` (continue the last session) or
 `opencode run -s <sessionID>` to see it.
 
+**Headless (`opencode serve` with no client attached).** Nobody can answer a permission prompt
+there, so a turn that raises one waits until it times out or someone answers. The plugin never asks
+the model to read run files, but a model can still try: the run store is outside the project, so
+opencode asks for `external_directory` approval, and a turn woken by a notification can sit on that
+prompt. In unattended setups, add a rule for the data dir (`deny` is fine: the model then uses
+`workflow_control` `result`) or allow it.
+
 ## Usage
 
 ### Asking for a workflow
@@ -271,7 +281,25 @@ tells you so.
 The model has a `workflow_control` tool it can use when you ask: "stop that run", "pause the
 workflow", "save it as `audit`". Its actions are `list`, `status`, `stop` (the whole run),
 `stop_agent` (one agent, whose `agent()` returns `null`), `pause`, `resume`, `message` (steer a
-running agent, below) and `save`. It only sees the current session's runs.
+running agent, below), `save` and `result`. It only sees the current session's runs.
+
+**Per-agent outputs (`result`, an extension).** A workflow returns only the script's value, so when
+that value is empty or odd you want to know what each agent said. The task notification helps in two
+ways:
+
+- `<agent-failures>` names the agents whose `agent()` call returned `null` (failed, stopped, or a null
+  value), with the first line of each error, at most 10 of them. This is often enough to explain the
+  result without another call.
+- `<diagnostics>` tells the model to check the agents with `workflow_control` `result` before it
+  diagnoses an empty or unexpected result (Claude Code's own advice, pointed at a tool instead of a
+  file).
+
+`{action: "result", runId}` lists every agent, failed ones first, one line each with a preview of its
+return value or its error, 50 per page. `agent: "3"` (or `"#3"`, or an exact label) shows one agent in
+full: its details (model, usage, prompt, error, steering messages) and its whole return value, 50,000
+characters per page. It works as soon as the run has finished. While the run is still going it only
+repeats the status note, so it cannot be used to peek at partial output. The model reads nothing from
+disk, so there are no permission prompts.
 
 ### Steering a running agent
 
@@ -405,8 +433,8 @@ have the same name, the closest project directory wins, and project wins over pe
 
 ### Resume
 
-Each run has a transcript directory with `script.js`, `journal.jsonl` (one line per finished agent),
-`run.json` and `agents/<i>.json`. After a stop, a failure or a script edit, ask the model to relaunch
+Each run has a transcript directory with `script.js`, `journal.jsonl` (one line per finished agent,
+in completion order), `run.json` and `agents/<i>.json`. After a stop, a failure or a script edit, ask the model to relaunch
 with `resumeFromRunId`. The longest unchanged prefix of `agent()` calls returns cached results at
 once. Everything from the first changed or unfinished call onward runs live. A cached agent keeps
 the model it ran on in the original run.
@@ -459,17 +487,18 @@ Set them in the environment of the opencode server. They work with every install
 ## How it compares to Claude Code
 
 Behavior follows Claude Code's [dynamic workflows](https://code.claude.com/docs/en/workflows) item by
-item. [`docs/PARITY.md`](docs/PARITY.md) lists each of the 59 behaviors with its status and the tests
+item. [`docs/PARITY.md`](docs/PARITY.md) lists each of the 60 behaviors with its status and the tests
 that check it:
 
 | Status | Count | Meaning |
 |---|---|---|
 | FULL | 46 | Same behavior |
 | DEGRADED | 12 | Works, with a documented limitation |
+| ADAPTED | 1 | Same purpose, reached another way |
 | N/A | 1 | Cannot be done as an opencode plugin |
 
-The same file specifies the 19 extensions (status `EXT`, `X01`–`X19`): steering, the live progress
-tree and its RPC, and the per-agent model display.
+The same file specifies the 21 extensions (status `EXT`, `X01`–`X21`): steering, the live progress
+tree and its RPC, the per-agent model display, and the per-agent failure summary and outputs.
 
 Most of the gaps come from one limit of opencode's plugin API: **a plugin cannot create a child
 session with a `parentID`**. So workflow agents aren't nested under your session in the UI, and
@@ -493,6 +522,7 @@ opencode never shows their permission prompts. Upstream work to expose this:
 | P73 | Restart one agent | DEGRADED | Use `stop_agent`, or stop the run and resume it. |
 | P74 | Open an agent's transcript | DEGRADED | Open its tagged child session. `agents/<i>.json` holds its `sessionID`. |
 | P76 | `scriptPath` permission checks | DEGRADED | An "ask" counts as refused. |
+| P79 | Per-agent results named in the notification | ADAPTED | Claude Code points at `journal.jsonl`. Here `<diagnostics>` points at `workflow_control` `result`, because the run store is outside the project (a permission prompt per read) and opencode's `read` cuts long lines. |
 
 Also:
 
@@ -506,6 +536,17 @@ Also:
 - **The live tree needs the plugin's TUI part.** The npm package and directory installs have it; a
   single-file loader and the web UI do not (use `/workflows` there). Desktop notifications need a
   terminal that reports focus; Windows conhost gets a toast instead.
+- **A long workflow result is not clipped.** The notification carries the script's whole return value;
+  a very large one (100 KB and more) costs tens of thousands of tokens in the parent. Return a summary
+  and keep bulk data in the agents: the model can read them with `workflow_control` `result`.
+- **A refused `agent()` call leaves no trace.** A call refused before the agent starts (token budget
+  spent, the 1000-agent cap, an invalid schema) throws in the script. Uncaught, it fails the run with
+  that error. Inside `parallel()`/`pipeline()` it becomes a `null` that neither the failure summary nor
+  `result` lists.
+- **Polling and relaunching are model habits.** The tool descriptions tell the model to end its turn
+  after launching and not to relaunch unasked. Some small models (seen with a free nemotron) still
+  call `status` a few times while a run is going, or relaunch a failed run. A model that reads a
+  finished run's agents before its notification arrives may also report twice.
 - **The model shown is the one opencode reports** for the agent's session. Until the child session
   exists, an agent shows only the model its script names (`model` option), or none.
 
@@ -524,7 +565,13 @@ Also:
 - **`scriptPath` reads only files you could read anyway**: the project, this session's runs and the
   personal workflows directory, plus directories an `external_directory` allow rule covers. Symlinks
   are resolved first, `read` deny rules apply, and UNC or device paths are refused.
-- **Runs are private to their session.** Another session's run id answers "not found".
+- **Runs are private to their session.** Another session's run id answers "not found". This covers
+  `workflow_control` `result` too: the parent model sees its own runs' agent outputs, and workflow
+  agents cannot call it.
+- **The model never needs to read the run store.** Agent outputs reach it through `result`, not files.
+  The run store is outside your project, so if a model reads it anyway, opencode's `read` asks for
+  `external_directory` approval as usual. The notification tells the model not to read it with shell
+  commands, but only your permission rules actually enforce that.
 - **Steering needs the same access.** Only the user of the parent session (`/workflows msg`) and the
   parent model (`workflow_control`, when you ask) can message a run's agents. Workflow agents
   cannot: `workflow_control` is denied in every child. A message is plain text framed as
@@ -582,6 +629,11 @@ agents, and a big fan-out can use many times the tokens of a single chat. For ex
 | `plugin list` prints `No plugins found` right after an install | The service is still loading the plugin. Run it again after a few seconds. |
 | `EPERM: operation not permitted, rename` during `plugin add` (Windows) | A file lock (often antivirus) in opencode's npm cache. Run the same command again. |
 | The notification arrives late | Notifications are queued after your current turn, by design. |
+| The result is empty or `null` and you want to know why | Ask the model what the agents returned. It uses `workflow_control` `result`, which lists failed agents first. You can also look yourself with `/workflows <runId>`. |
+| opencode asks for `external_directory` access to the workflows data dir | The model tried to read run files. Deny it: `workflow_control` `result` gives the same data without a prompt. |
+| A headless `opencode serve` turn hangs after a run finishes | A permission prompt is waiting and no client is attached to answer it (often an `external_directory` read of the data dir). Answer it through the API, or add a `deny`/`allow` rule for the data dir. |
+| The model calls `workflow_control status` over and over while a run is going | Model habit: status never returns the result, and from the second call it says repeating does not help. Tell it to wait for the notification. |
+| The model relaunched a failed run without being asked | Model habit (some small models do it). The failed-run notification says to retry only if you ask; tell it not to relaunch. |
 | An agent fails with "workflow agents cannot ask for approval" | Add an opencode `allow` rule for the tool or directory it needs. |
 | `/deep-research` stops with `NO_WEB_ACCESS` | Run one web search in your own session first to pick a provider. |
 
@@ -615,6 +667,14 @@ Usually yes: the script API is the same. See [docs/PARITY.md](docs/PARITY.md) fo
 **Where are runs stored?**
 In the `dataDir` plugin option if set, else in `OPENCODE_WORKFLOW_DATA_DIR`, else in the default data
 directory (see [Environment variables](#environment-variables)), as `<sessionID>/<runId>/`.
+
+**How do I see what one agent returned?**
+Ask the model after the run has finished, for example "what did the `review-auth` agent say?". It
+calls `workflow_control` with `{action: "result", runId, agent: "review-auth"}`, where `agent` is the
+index (`"3"` or `"#3"`) or the exact label. Without `agent` it lists every agent, failed ones first.
+The notification already names the agents that returned `null`, with their error. You can also look
+yourself: `/workflows <runId>` shows each agent's result as one line, the live tree opens its child
+session, and `agents/<i>.json` in the run directory holds the full record.
 
 ## Development and contributing
 

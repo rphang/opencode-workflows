@@ -175,9 +175,14 @@ Each run's transcript directory (`<data dir>/<sessionID>/<runId>/`) holds:
 | File | Content |
 |---|---|
 | `script.js` | The script that ran. |
-| `journal.jsonl` | One line per finished agent, with its return value, plus one `{"type":"message"}` line per steering message an agent accepted. |
+| `journal.jsonl` | One line per finished agent, in completion order, with its return value or error, plus one `{"type":"message"}` line per steering message an agent accepted. A resumed run journals its cached agents again; the last line for an index wins. |
 | `run.json` | The run summary, including the result. |
-| `agents/<i>.json` | Each agent's prompt, result, usage and child `sessionID`. |
+| `agents/<i>.json` | Each agent's full record: prompt, result, error, usage, model, child `sessionID`, steering messages, and `workflow` / `threw` / `cachedFrom` when they apply. |
+
+The parent model does not read these files. After the notification it gets each agent's return
+value with `workflow_control` `{action: "result", runId, agent?}` (failed agents first; one agent in
+full with `agent: "3"` or its label). The directory is outside the project, so a file read needs
+`external_directory` approval, and opencode's `read` cuts lines at 2000 characters.
 
 Relaunch with `{ scriptPath, resumeFromRunId }` after a stop, a failure or a script edit. The run
 replays in agent **start** order. The longest unchanged prefix of finished `agent()` calls (same

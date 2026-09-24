@@ -217,6 +217,17 @@ describe("P06 completion notification", () => {
     expect(tag(text, "usage")).toMatch(/agent_count: 1/)
   })
 
+  test("P06 failed: the result is the error once (no doubled 'Error:' prefix) and a retry hint only for when the user asks", async () => {
+    const p = await h.setup()
+    const out = await p.call({ script: script(`await agent("x"); throw new Error("kaboom")`) })
+    const result = tag(String((await p.notification(0)).text), "result")!
+    expect(result).toMatch(/^Error: [^\n]*kaboom/)
+    expect(result).not.toMatch(/Error: Error/)
+    expect(result.split("\n")[1]).toBe(
+      `To retry (only if the user asks for it): fix the script at scriptPath and relaunch with resumeFromRunId "${out.runId}" to reuse completed agents.`,
+    )
+  })
+
   test("P06 stopped: status stopped", async () => {
     const runner = new FakeRunner().on("slow", { hold: true })
     const p = await h.setup({ runner })

@@ -76,6 +76,7 @@ messages; assistant messages are `{type:"assistant", content:[{type:"text", text
   parity, `X` = extensions marked `EXT`).
 - `docs/E2E.md` — live test harness, known gotchas, the demo script.
 - `docs/OPENCODE-API-NOTES.md` — observed opencode 2.0.15 plugin API behavior.
-- `docs/design/` — approved designs for features beyond Claude Code (steering, live progress tree).
+- `docs/design/` — approved designs for features beyond Claude Code (steering, live progress tree)
+  and design decisions such as how the parent model sees per-agent outputs (`agent-output-access.md`).
 - `docs/notes/` — maintainer notes and drafts (not published anywhere).
 - `docs/assets/` — images used by the README.

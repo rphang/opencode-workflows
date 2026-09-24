@@ -10,6 +10,31 @@ may contain breaking changes.
 
 ### Added
 
+- **Per-agent outputs** (`workflow_control` `result`, an extension; PARITY X21). For a finished run
+  (completed, failed or stopped, also after a resume or a plugin reload), `{action: "result", runId}`
+  lists every agent, one line each: failed, stopped and `null` ones first, with a preview of the
+  return value or the error, 50 per page. `agent: "3"` (or `"#3"`, or an exact label) shows one agent
+  in full: status, phase, nested workflow, whether it was replayed from an earlier run, model, child
+  session, usage, duration, prompt, error, warnings and steering messages, then its whole return
+  value, 50,000 characters per page. `offset` takes the next page from the footer. While a run is
+  going it returns the status note unchanged, so it cannot show partial output. The model reads no
+  files for this, so there are no `external_directory` prompts.
+- **Agent failure summary in the notification** (an extension; X20). `<agent-failures>` lists up
+  to 10 agents whose `agent()` returned nothing (failed, stopped, still running, or a `null` value),
+  one line each with the first line of the error, and says whether `agent()` threw (schema) or the
+  agent belonged to a nested `workflow()`. The whole block is capped at 2,800 bytes of UTF-8 (lines
+  that would overflow join the "… and K more" count), so it stays under 3 KB even for 1000 failed
+  agents with long non-ASCII labels and errors. A failed
+  run with no failed agent says the error came from the script (including `agent()` calls refused
+  before an agent started).
+- **Diagnostics pointer in the notification** (P79, adapted from Claude Code). `<diagnostics>` tells
+  the model to check the agents with `workflow_control` `result` BEFORE diagnosing an empty or
+  unexpected result, and not to read the transcript files with shell commands. Claude Code points at
+  `journal.jsonl`; here that file is outside the project (a permission prompt per read) and opencode's
+  `read` cuts its long lines. The `workflow` tool description gains a PER-AGENT OUTPUTS paragraph.
+  The bake-off behind this design is in `docs/design/agent-output-access.md`.
+- From the 2nd `workflow_control` status or `result` call on a run since it last changed state, the
+  reply adds "Repeating this call does not wait or speed anything up." (P77).
 - **Steering a running agent** (an extension beyond Claude Code; PARITY X01–X09). Send an instruction
   to a running workflow agent without restarting it: `/workflows msg <runId> <target> <text>` (user),
   or `workflow_control` with `action: "message"` (the parent model, when you ask). Targets: an agent
@@ -57,6 +82,14 @@ may contain breaking changes.
 
 ### Changed
 
+- A failed run's notification no longer reads as an order to relaunch: its `<result>` ends with
+  "To retry (only if the user asks for it): …". Models relaunched failed runs unasked (P06).
+- Model-facing `workflow_control` status of a finished run no longer points to
+  `<transcriptDir>/run.json`. That line sent models to read files outside the project, which raises a
+  permission prompt each time (P77).
+- Agent records (`agents/<i>.json`) gain `workflow` (the nested `workflow()` that started the agent),
+  `threw` (a schema agent whose `agent()` threw) and `cachedFrom` (the run a cached agent was replayed
+  from).
 - `/workflows`: phase lines show how many agents are running, and the run line shows the cost.
 - Both subagent preambles (P78) now say that `<orchestrator-message>` blocks may arrive while the agent
   works. Resume keys are unchanged.
@@ -71,6 +104,7 @@ may contain breaking changes.
 
 ### Fixed
 
+- A failed run whose error already started with `Error:` showed `Error: Error: …` in the notification.
 - `meta.phases[].model` was validated and then dropped: the phase label a script declared never
   appeared anywhere (X10).
 - Pre-release fixes to the new features, from a review and a live verification:

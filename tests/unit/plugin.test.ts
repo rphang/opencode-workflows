@@ -193,7 +193,7 @@ describe("plugin entry", () => {
       ["args", "budget", "description", "name", "resumeFromRunId", "script", "scriptPath", "title"].sort(),
     )
     const ctl = tools.get("workflow_control")!
-    expect(ctl.input.properties.action.enum).toEqual(["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save"])
+    expect(ctl.input.properties.action.enum).toEqual(["list", "status", "stop", "stop_agent", "pause", "resume", "message", "save", "result"])
     // X01/X05/X08: message targets and options
     for (const k of ["agentIndex", "label", "phase", "all", "text", "urgent"]) expect(ctl.input.properties[k]).toBeDefined()
   })
@@ -501,7 +501,7 @@ describe("location keep-alive (opencode evicts a location after 60 min without s
 })
 
 describe("workflow_control tool", () => {
-  test("P77 a finished run on disk (e.g. the process died before notifying): model-facing status points to run.json, not the result", async () => {
+  test("P77 a finished run on disk (e.g. the process died before notifying): model-facing status shows no result and names no file to read", async () => {
     const store = new RunStore({ root: dataDir })
     const { runId, dir } = await store.createRun(SESSION)
     await store.writeSummary({
@@ -512,7 +512,8 @@ describe("workflow_control tool", () => {
     const p = await setup()
     const status = await control(p, { action: "status", runId })
     expect(status).not.toContain("ORPHAN-RESULT")
-    expect(status).toContain("run.json")
+    expect(status).not.toContain("run.json")
+    expect(status).toContain("delivered to this session as a task notification")
   })
 
   test("P51 stop stops the whole run and notifies status stopped", async () => {
@@ -890,6 +891,13 @@ describe("format", () => {
     expect(t).toContain("boom")
   })
 
+  test("X20 formatTaskNotification without agent records has no <agent-failures> block (unknown is not 'none failed')", () => {
+    const t = formatTaskNotification({ ...summary, status: "failed", result: undefined, error: "boom" })
+    expect(t).not.toContain("<agent-failures>")
+    const known = formatTaskNotification({ ...summary, status: "failed", result: undefined, error: "boom" }, 5000, [])
+    expect(known).toMatch(/<agent-failures>No agent failed/)
+  })
+
   const phased: RunSummary = {
     ...summary,
     phases: [
@@ -919,7 +927,10 @@ describe("format", () => {
     expect(model).not.toContain("agent says hi")
     expect(model).toContain("Finished. Its result is not shown here: it is delivered to this session as a task notification")
     expect(model).toContain("/t")
-    expect(model).toContain("run.json")
+    // The finished-run note names no file (reading one outside the project asks for approval) and
+    // no other action: before the notification arrives there is nothing new to call.
+    expect(model).not.toContain("run.json")
+    expect(model).not.toMatch(/"result"|action result/)
     const running = formatRunStatus({ ...summary, status: "running", result: undefined }, [], 5000, { forModel: true })
     expect(running).toContain("Still running. The result is delivered to this session as a task notification")
     expect(running).toContain("end your turn now; do not poll, sleep, or run shell commands to wait")
