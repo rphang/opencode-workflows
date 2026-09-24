@@ -38,11 +38,120 @@ The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes.
   reports `outcome:"interrupted"`. **The tokens and cost of an interrupted turn are not counted**:
   `get()` showed 0 for all of them after interrupting a turn that had streamed for about 2.5
   seconds. As a result, stopped agents report whatever usage had been recorded before the stop.
+- `synthetic({sessionID, text, description?, metadata?, delivery?, resume?})` puts an item in the
+  session inbox and returns within a few ms with `{id, sessionID, type:"synthetic", delivery, …}`.
+  See "Inbox and steering" below.
+- `interrupt({sessionID, resume:true})` ends the current step and lets the session carry on with a
+  successor execution that reads the inbox (verified live; used by urgent steering, X08). On an
+  **idle** session it interrupts nothing (`{interrupted:false}`) but still starts an execution when
+  a steer item is pending, and does nothing when none is (`execution.interrupt` →
+  `SessionInbox.nextPromotable` → `wake`; the server API documents it as "resumes pending steering
+  input"). Verified live in e2e `steer.test.ts` ("X03 opencode: …"). The runner uses this to deliver
+  a steer that missed the turn.
+- `wait()` is `execution.awaitIdle`: after an execution settles it checks again, so it also covers a
+  successor execution started at settle or by a wake that happened before `wait()` was called.
 - **Terminal failure** (tested with an unknown model `openai/no-such-model-xyz`): `wait()` resolves
   within milliseconds and `get().outcome` is `"failed"`. `context()` contains **only**
   `[user, {type:"idle", outcome:"failed"}]`, with no assistant message and no error text. When an
   assistant message does exist, `error: {type, message, status?}` is set on it *(types)*. The
   runner reports that message, or a generic "agent session failed (terminal error)".
+
+## Inbox and steering (X01–X08)
+
+Verified live on 2.0.15 with a throwaway spike plugin (children on `openai/gpt-5.4-mini` calling a
+3-second tool), and in `packages/core/src/session/{inbox,execution,run-coordinator}.ts` and
+`runner/llm.ts` *(source)*:
+
+- **`delivery:"steer"` items are promoted before every model step.** The drain loop in
+  `runner/llm.ts` checks the inbox before each step, so a steer sent mid-turn becomes a user-role
+  context message `{id, type:"synthetic", text, description?, metadata?}` at the next step
+  boundary of the **same** execution: one execution, `wait()` resolves once, outcome
+  `succeeded`. It is not read mid-step: the step in progress and all its tool calls finish first.
+- **The returned `id` is the id of that context message**, so "was it delivered?" is
+  `context().some(m => m.id === res.id)`. Its `time.created` is the delivery time.
+- **`resume:false` can orphan a message.** A steer that lands after the drain loop's last check
+  (as the final step starts), or while the session is idle, stays in the inbox and is never read
+  (3 out of 3 live attempts). `resume:true` behaves the same mid-turn, and at the end of a turn
+  wakes the session into a successor execution that reads it. `wait()` follows successor
+  executions, but one started after `wait()` resolved is only seen by a later `wait()`. In the
+  e2e runs (`tests/e2e/steer.test.ts`), messages sent up to 0.8 s after a child's last tool call
+  returned were still read in the same execution: when a step finishes with items in the inbox,
+  opencode takes another step.
+- **Worktree children** (another Location) receive steers sent by the parent Location's plugin
+  instance: `synthetic()` addresses the session by id (verified live).
+- **`delivery:"queue"` runs as an extra turn after the current one**, and its reply becomes the
+  last assistant message: for a workflow agent it would replace the result. The plugin never uses
+  it for steering (only for the parent's task notification, P06).
+- **`interrupt({resume:true})`** gives `execution.interrupted{reason:"user"}`, then a new execution
+  that reads the inbox; `get().outcome` ends `succeeded`. The interrupted step's tokens are lost
+  from the session usage, and the history gets an `{type:"idle", outcome:"interrupted"}` marker.
+- The plugin API cannot list or cancel inbox items (`DELETE /api/session/:id/inbox/:inboxID` exists
+  over HTTP only). opencode's session view does not render synthetic messages, so a steering
+  message is visible in `/workflows <runId>` and `agents/<i>.json`, not in the child's transcript
+  view (it is in the child's `context()`).
+
+- **A parked steer is promoted in a step of its own, before queued items.** `promote()` publishes
+  every pending steer and returns; a queued item is promoted at the next boundary. So a session
+  with a parked `resume:false` steer (for example `/workflows` output) and a queued `resume:true`
+  item (the task notification) runs two model steps when it wakes: one answering the steer, one
+  the queued item. Reproduced live in e2e `steer.test.ts`.
+
+How the runner uses this (design: `docs/design/steering-and-live-tree.md` §A.4): a message is sent
+with `synthetic({delivery:"steer", resume:false})` only while the agent's turn runs, so it never
+wakes the child by itself. When `wait()` resolves the runner stops accepting messages for that turn
+and checks every sent id in `context()`. If one is missing (it arrived after the turn's last step
+boundary and is parked), the runner calls `interrupt({resume:true})`, which starts the successor
+turn that reads it, and checks again with a short backoff (about 2 s) before it reads the result,
+then waits once more so the reply to a late message is complete. A message still missing then is
+reported `undelivered` and stays parked: no turn ever runs after the result was read. A send whose
+`synthetic()` returned no id gets the same wake and one short extra wait, and stays `sent`.
+Messages for an agent that has no session yet are appended to its first prompt instead. (Before
+0.2, messages went out with `resume:true`, which could start a successor turn after the runner
+had given up verifying: that turn ran unread and its tokens were never counted.)
+
+## RPC, events and TUI plugins (X11–X16)
+
+Verified live on 2.0.15: a throwaway spike (local `.tsx` TUI plugin) and the packaged plugin
+installed from a local registry into an isolated sandbox (design: `docs/design/steering-and-live-tree.md`).
+
+- **`ctx.rpc.register(definition, handlers)`** resolves `{events: {emit(name, data)}, dispose()}`.
+  `definition` is plain data: `{id, methods: {name: {input, output}}, events: {name: {schema}}}` with
+  JSON Schema values. Handlers must return JSON (`rpc.invalid_output "Expected JSON value"`
+  otherwise); an input that fails its schema is rejected before the handler runs
+  (`rpc.invalid_input`).
+- **Over HTTP:** `POST /api/rpc/<id>/<method>` with header `x-opencode-directory: <url-encoded dir>`
+  and the body **`{"input": {...}}`**; the reply is `{"output": {...}}`. A bare `{...}` body gives
+  `{"_tag":"RpcError","type":"rpc.invalid_input","message":"Expected object"}`. The call goes to the
+  plugin instance of that Location (booting it if needed).
+- **RPC events** are published on the one global `/api/event` stream as `rpc.<id>.<name>`, with the
+  emitting instance's `location.directory`. A TUI receives the events of every Location (the spike saw
+  a worktree Location's events), so the client filters them itself. Calls are routed per Location;
+  events are not.
+- **`ctx.event.subscribe({signal})`** is an async iterable of every event. Child-session events used
+  by the activity overlay: `session.step.started {model:{id, providerID}}`,
+  `session.tool.input.started {id, name}`, `session.tool.called {id, input}` (no `name`: map it from
+  the `id`), `session.text.started|delta {delta}|ended {text}`, `session.reasoning.*`,
+  `session.usage.updated {cost, tokens}` (cumulative), `session.inbox.delivered`.
+- **TUI entry.** `Host.resolve` returns `{server, tui, rpc}`: for a package it resolves
+  `<name>/tui` through `exports`, for a directory `<dir>/tui`. When a TUI entry exists the server
+  reports `features.tui` and the TUI imports it. The TUI swaps in its own `solid-js`, `solid-js/store`,
+  `@opentui/*` and `@opencode/plugin/tui` for plugin modules, **including ESM files under
+  `node_modules`** (`"type": "module"`), but it **JSX-compiles only local files**. So the published
+  `dist/tui.js` is precompiled with `@opentui/solid`'s Babel transform (Solid universal mode) and
+  keeps those modules external. Verified: installed as `@rphang/opencode-workflows@0.2.0-live.2` from
+  a local registry, it loaded (`features:{server:true,tui:true}`) and rendered the footer and panel.
+- **TUI API used:** `ui.slot({append:"prompt.footer.status" | "home.footer.status" | "session.panel" |
+  "app"})`; `ui.panel.open(name)` works on a session route only and gives the panel focus;
+  `<leader>left`/`<leader>right` move focus between session and panel. A `keymap.layer` created in
+  the panel's render with `enabled: () => input.focused` receives plain keys (`up,k`, `return`, `x`,
+  `shift+m`, `escape`). `ui.tabs.focus(childSessionID)` opens a workflow child in a new tab.
+  `ui.dialog.confirm`/`prompt`/`select` and `ui.toast.show` work from a keymap command.
+- **`attention.notify`** returns `{ok, notification, sound, skipped?}`: `skipped:"attention_disabled"`
+  unless `cli.json` sets `attention.notifications` (or `.sound`), and `"focus_unknown"` in Windows
+  conhost, which does not report focus. The plugin then shows a toast (seen live).
+- **Windows conhost draws emoji-capable symbols (✉ ⚙ ✎) two cells wide** while opentui counts one, so
+  the rest of the line shifts and characters get overwritten. The tree uses narrow glyphs only
+  (● ✓ ✗ ◌ » and box-drawing).
 
 ## Permissions (P60/P61)
 
@@ -183,6 +292,13 @@ Live results (2026-09-23): `plain`, `schema`, `effort`, `abort` (stopped after 3
 submit), and `retry` all behaved as specified.
 
 ## Plugin install resolution
+
+- **A sandbox inside a checkout of this package breaks package installs.** With `XDG_CACHE_HOME`
+  under the repo, resolving `@rphang/opencode-workflows/server` from the (not yet existing) cache
+  directory falls back to Node's package *self-reference* (the repo's own `package.json` has that name
+  and `exports`), so opencode loads the checkout's `dist/` and never installs the published copy. Put
+  a `package.json` with another name at the sandbox root. Also seen once on Windows: the install's
+  staging-directory rename failed with `EPERM`; restarting the server retried it and it worked.
 
 - A config entry `"plugins": ["file:///<dir>"]` (or a plain directory path, or
   `{"package": "file:///<dir>", "options": {...}}`) is resolved by `Host.resolve({directory})`

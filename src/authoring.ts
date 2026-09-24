@@ -43,6 +43,8 @@ If the script fails its syntax/meta check the result carries \`error\` and nothi
 **After launching, END YOUR TURN**: tell the user the run started and stop. The result reaches you only as
 a task notification, which wakes this session when the run finishes. Never call workflow_control status,
 sleep, or run shell commands to wait for completion: status shows progress, never the result. Use \`workflow_control\` status/list only when the user asks about progress.
+When it arrives, its \`<agent-failures>\` block names (up to 10) agents that returned \`null\` with the first line
+of each error, and its \`<diagnostics>\` block points at \`workflow_control\` \`result\` (see Resume and diagnostics).
 
 ## The meta block
 
@@ -160,16 +162,29 @@ outside the project) is denied, so put everything they need in the prompt.
   break resume. Pass timestamps in through \`args\`, stamp results after the workflow returns, and
   vary prompts or labels by index instead of randomness.
 
-## Resume
+## Resume and diagnostics
 
 Each run has a \`runId\` and a transcript directory holding \`script.js\` and \`journal.jsonl\` (one line
-per completed agent with its actual return value). To continue after a stop, a failure or a script
+per finished agent with its actual return value). To continue after a stop, a failure or a script
 edit, relaunch with \`{scriptPath, resumeFromRunId}\`. The run is replayed in agent START order: the
 longest unchanged prefix of completed \`agent()\` calls (same prompt and options) returns cached
 results instantly; the first changed, failed or unfinished call and EVERY call after it runs live.
 Same script + same args → 100% cache hit. Resuming an unknown run fails with \`nothing to resume\`.
-Before diagnosing an empty or unexpected result, read \`<transcriptDir>/journal.jsonl\` — do not assume
-cached results are non-empty.
+Only resume or relaunch when the user asks for it.
+
+**Per-agent outputs.** Before diagnosing an empty or unexpected result, check what each agent returned — do
+not assume agents returned non-empty results (cached ones included). Use \`workflow_control\`
+\`{action: "result", runId}\` once the task notification has arrived: it lists every agent (failed, stopped
+and \`null\` ones first) with a preview of its return value or its error, 50 rows per page (\`offset\` from the
+footer for the next page); \`agent: "3"\` (or \`"#3"\`, or an exact label) gives that agent's details and its full
+return value, 50,000 characters per page. It is for a finished run, not a progress check: while the run is
+going it only repeats the status note. On disk the same data is in the transcript directory:
+\`journal.jsonl\` has one \`{type:"result", index, status, value | error}\` line per finished agent in
+completion order (a resumed run journals its cached agents again; the last line for an index wins), and
+\`agents/<i>.json\` holds each agent's full record (prompt, result, error, usage, child session id). Prefer the
+action over reading those files: the directory is outside the project, so every read needs the user's
+\`external_directory\` approval (a headless \`opencode serve\` turn can block on that ask), and the read tool
+cuts each line at 2000 characters, so a long journal line cannot be read whole.
 
 ## Pipeline by default
 
@@ -297,6 +312,8 @@ editing them per run.
 export const TOOL_DESCRIPTION = `Run a dynamic workflow: a JavaScript script that orchestrates many subagents (fan-out, pipelines, adversarial verification) in the background. Only the script's return value comes back to you, as a task notification when the run finishes; the tool itself returns immediately with a runId and scriptPath.
 
 AFTER LAUNCHING, END YOUR TURN: tell the user the run started and stop; the task notification wakes you with the result. Never call workflow_control status, sleep, or run shell commands to wait for completion; status is only for when the user asks about progress.
+
+PER-AGENT OUTPUTS: after the task notification arrives, workflow_control action "result" shows what each agent returned (failed agents first). Use it when the result is empty or unexpected, or when the user asks what a specific agent said. It is for diagnosing a finished run, not for checking progress: while the run is going it only repeats the status note.
 
 WHEN TO USE: only with explicit user opt-in — the user typed the keyword "ultracode", asked in their own words ("use a workflow", "run a workflow"), or invoked a saved/bundled workflow command (e.g. /deep-research). Never start one on your own initiative otherwise. Good fits: codebase-wide audits or bug sweeps, large migrations, research that needs sources cross-checked, plans drafted from several independent angles. Workflow subagents cannot launch workflows.
 

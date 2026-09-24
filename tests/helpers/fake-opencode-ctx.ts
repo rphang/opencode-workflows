@@ -9,7 +9,18 @@
 //   session.context-> [{type:"user", text}, {type:"assistant", content:[{type:"reasoning"}|
 //                     {type:"text", text}|{type:"tool", ...}], error?, tokens, cost},
 //                     {type:"idle", outcome}]   (a failed turn may have NO assistant message)
-//   session.interrupt -> {interrupted: true}
+//   session.interrupt -> {interrupted: true}; with {resume:true} the session carries on with a
+//                     successor turn that reads the inbox (verified live, design §A.3). On an IDLE
+//                     session it interrupts nothing, but {resume:true} still wakes it when a steer
+//                     item is pending (opencode: execution.interrupt → nextPromotable → wake)
+//   session.synthetic -> {id, sessionID, type:"synthetic", delivery}. Steering model (verified live
+//                     on 2.0.15, design §A.3): the item waits in the session inbox and becomes a
+//                     context message {id: <that id>, type:"synthetic", text} at the next step
+//                     boundary of the running turn (the inbox is drained before every step). An item
+//                     that arrives after the last boundary, or while the session is idle, starts a
+//                     successor turn when resume:true (after `successorDelayMs`) and stays parked
+//                     otherwise. session.wait covers a successor already scheduled (awaitIdle
+//                     re-checks); an item admitted after wait() resolved needs another wait().
 //   worktree.create -> {directory}; worktree.remove -> undefined
 //   model.list -> {location, data: ModelInfo[] (variants: [{id}])}
 //
@@ -37,6 +48,20 @@ export interface FakeTurn {
   delayMs?: number
   /** Marks the session's directory (worktree) dirty. */
   writeFile?: boolean
+  /** Model steps in this turn (default 1). The inbox is drained before each step. */
+  steps?: number
+  /** Duration of each step. */
+  stepDelayMs?: number
+  /** Called at the start of each step, after the inbox was drained (0-based). */
+  onStep?: (step: number) => void | Promise<void>
+  /** Called after the last step, before the turn ends: a message sent here misses this turn. */
+  afterSteps?: () => void | Promise<void>
+  /** The session's model after this turn (an opencode fallback mid-run); get() reports it from then on. */
+  model?: { providerID: string; id: string; variant?: string }
+  /** Final text computed when the turn ends (sees messages delivered during it). Overrides `text`. */
+  textFn?: (session: FakeSession) => string
+  /** Called after this turn's `submit` values went through workflow_submit, before the turn ends. */
+  afterSubmit?: () => void | Promise<void>
 }
 
 export interface TurnInput {
@@ -45,6 +70,8 @@ export interface TurnInput {
   /** 0-based turn number within this session. */
   turn: number
   session: FakeSession
+  /** A turn opencode started by itself to read inbox items (resume:true), not a prompt. */
+  successor?: boolean
 }
 
 export type Responder = (input: TurnInput) => FakeTurn | Promise<FakeTurn>
@@ -55,6 +82,26 @@ export interface FakeSession {
   busy?: Promise<void>
   finishTurn?: (outcome: "succeeded" | "failed" | "interrupted") => void
   turns: number
+  /** Steer items not yet delivered (session.synthetic). */
+  inbox: InboxItem[]
+  /** Steer items delivered so far (they are also context messages). */
+  delivered: InboxItem[]
+  /** A turn is executing (between its start and its idle marker). */
+  running?: boolean
+  /** interrupt() while running: stop at the next step. */
+  interruptFlag?: { resume: boolean }
+  /** The last turn was interrupted with resume:true: a successor turn follows. */
+  resumeAfterInterrupt?: boolean
+  successorScheduled?: boolean
+}
+
+export interface InboxItem {
+  id: string
+  text: string
+  resume: boolean
+  delivery: string
+  description?: string
+  metadata?: Record<string, unknown>
 }
 
 export interface FakeModel {
@@ -79,6 +126,19 @@ export interface FakeCtxOptions {
   directory?: string
   /** Agents known to ctx.agent.get (default DEFAULT_AGENTS). */
   agents?: FakeAgent[]
+  /** Delay before a resume:true successor turn starts (default 5 ms). */
+  successorDelayMs?: number
+  /** Never start successor turns (a steer that misses the running turn stays orphaned). */
+  noSuccessor?: boolean
+  /** interrupt({resume:true}) on an idle session does not wake it (a wake that never delivers). */
+  ignoreWake?: boolean
+  /** session.synthetic returns no id (the delivery cannot be verified in context()). */
+  syntheticNoId?: boolean
+  /**
+   * The model a created child actually gets, from the requested one (default: the requested one with
+   * variant "default"); undefined = no model (get() shows none, like opencode's default model).
+   */
+  childModel?: (requested: any) => { providerID: string; id: string; variant?: string } | undefined
 }
 
 export interface FakeAgent {
@@ -150,6 +210,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     agentGet: [] as string[],
     submitResults: [] as { sessionID: string; result: Tool.Result }[],
     update: [] as any[],
+    synthetic: [] as any[],
   }
   /** permission.hook("evaluate", cb) registrations (opencode runs them on every rule evaluation). */
   const permissionHooks: { name: string; cb: (event: any) => unknown }[] = []
@@ -166,7 +227,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     location: { directory },
     ...opts.parent,
   }
-  sessions.set(PARENT_ID, { info: parentInfo, messages: [], turns: 0 })
+  sessions.set(PARENT_ID, { info: parentInfo, messages: [], turns: 0, inbox: [], delivered: [] })
 
   function need(sessionID: string): FakeSession {
     const s = sessions.get(sessionID)
@@ -174,16 +235,56 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     return s
   }
 
-  async function runTurn(s: FakeSession, text: string, turn: number) {
-    const spec = await respond({ sessionID: s.info.id, text, turn, session: s })
+  /** Promotes every inbox item to a context message (what opencode does before each model step). */
+  function drain(s: FakeSession): InboxItem[] {
+    const items = s.inbox.splice(0)
+    for (const it of items) {
+      s.messages.push({ id: it.id, time: { created: 2 }, type: "synthetic", text: it.text, ...(it.description ? { description: it.description } : {}) })
+      s.delivered.push(it)
+    }
+    return items
+  }
+
+  /** resume:true: opencode wakes the idle session and runs a successor turn over the inbox. */
+  function scheduleSuccessor(s: FakeSession) {
+    if (opts.noSuccessor || s.successorScheduled) return
+    s.successorScheduled = true
+    setTimeout(() => {
+      s.successorScheduled = false
+      if (!s.inbox.length && !s.resumeAfterInterrupt) return
+      const turn = s.turns++
+      const prev = s.busy ?? Promise.resolve()
+      delete s.info.outcome
+      s.busy = prev.then(() => runTurn(s, null, turn))
+    }, opts.successorDelayMs ?? 5)
+  }
+
+  async function runTurn(s: FakeSession, text: string | null, turn: number) {
+    s.running = true
+    const successor = text === null
+    s.resumeAfterInterrupt = false
+    const first = drain(s)
+    const spec = await respond({ sessionID: s.info.id, text: successor ? first.map((i) => i.text).join("\n\n") : text, turn, session: s, successor })
     if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs))
     let outcome: "succeeded" | "failed" | "interrupted" = spec.outcome ?? "succeeded"
-    if (spec.hang) {
+    for (let i = 0; i < (spec.steps ?? 1); i++) {
+      if (i > 0) drain(s)
+      await spec.onStep?.(i)
+      if (spec.stepDelayMs) await new Promise((r) => setTimeout(r, spec.stepDelayMs))
+      if (s.interruptFlag) break
+    }
+    if (s.interruptFlag) {
+      outcome = "interrupted"
+      s.resumeAfterInterrupt = s.interruptFlag.resume
+      s.interruptFlag = undefined
+    }
+    if (spec.hang && outcome !== "interrupted") {
       outcome = await new Promise<"succeeded" | "failed" | "interrupted">((resolve) => {
         s.finishTurn = resolve
       })
       s.finishTurn = undefined
     }
+    if (outcome !== "interrupted") await spec.afterSteps?.()
     const content: any[] = [{ type: "reasoning", text: "thinking", state: {} }]
     for (const value of spec.submit ?? []) {
       if (!submitTool) throw new Error("fake: submit requested but no submitTool configured")
@@ -212,8 +313,11 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         time: { created: 1 },
       })
     }
-    if (spec.text !== undefined && outcome !== "interrupted") content.push({ type: "text", text: spec.text })
+    if (spec.afterSubmit && outcome !== "interrupted") await spec.afterSubmit()
+    const finalText = spec.textFn ? spec.textFn(s) : spec.text
+    if (finalText !== undefined && outcome !== "interrupted") content.push({ type: "text", text: finalText })
     if (spec.writeFile) dirty.add(s.info.location.directory)
+    if (spec.model) s.info.model = { ...spec.model }
     const t = spec.tokens ?? {}
     const tokens = {
       input: t.input ?? 100,
@@ -248,6 +352,8 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     s.messages.push({ id: `msg_i${++seq}`, time: { created: 3 }, type: "idle", outcome })
     s.info.outcome = outcome
     s.info.time.idle = 3
+    s.running = false
+    if (s.inbox.some((i) => i.resume) || s.resumeAfterInterrupt) scheduleSuccessor(s)
   }
 
   const ctx = {
@@ -260,7 +366,10 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         const info: Record<string, any> = {
           id,
           projectID,
-          ...(input.model ? { model: { variant: "default", ...input.model } } : {}),
+          ...(() => {
+            const m = opts.childModel ? opts.childModel(input.model) : input.model ? { variant: "default", ...input.model } : undefined
+            return m ? { model: m } : {}
+          })(),
           cost: 0,
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           time: { created: 1, updated: 1 },
@@ -270,7 +379,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
           ...(input.permissions ? { permissions: input.permissions } : {}),
           location: input.location ?? { directory },
         }
-        sessions.set(id, { info, messages: [], turns: 0 })
+        sessions.set(id, { info, messages: [], turns: 0, inbox: [], delivered: [] })
         return structuredClone(info)
       },
       async get(input: { sessionID: string }) {
@@ -300,7 +409,14 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
       async wait(input: { sessionID: string }) {
         calls.wait.push(input)
         const s = need(input.sessionID)
-        await s.busy
+        // opencode's wait is execution.awaitIdle: after an execution settles it checks again, so a
+        // successor turn started at settle (resume:true doorbell, interrupt({resume:true})) is covered.
+        for (;;) {
+          const busy = s.busy
+          await busy
+          if (s.busy === busy && !s.successorScheduled) return
+          if (s.successorScheduled) await new Promise((r) => setTimeout(r, 1))
+        }
       },
       async context(input: { sessionID: string }) {
         return structuredClone(need(input.sessionID).messages)
@@ -312,14 +428,36 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         if (input.title !== undefined) s.info.title = input.title
         if (input.permissions !== undefined) s.info.permissions = input.permissions
       },
-      async interrupt(input: { sessionID: string }) {
+      async interrupt(input: { sessionID: string; resume?: boolean }) {
         calls.interrupt.push(input)
         const s = need(input.sessionID)
         if (s.finishTurn) {
+          s.resumeAfterInterrupt = !!input.resume
           s.finishTurn("interrupted")
           return { interrupted: true }
         }
+        if (s.running) {
+          s.interruptFlag = { resume: !!input.resume }
+          return { interrupted: true }
+        }
+        if (input.resume && !opts.ignoreWake && s.inbox.length) scheduleSuccessor(s)
         return { interrupted: false }
+      },
+      async synthetic(input: { sessionID: string; text: string; description?: string; metadata?: any; delivery?: string; resume?: boolean }) {
+        calls.synthetic.push(input)
+        const s = need(input.sessionID)
+        const id = `msg_s${++seq}`
+        s.inbox.push({
+          id,
+          text: input.text,
+          resume: !!input.resume,
+          delivery: input.delivery ?? "steer",
+          description: input.description,
+          metadata: input.metadata,
+        })
+        if (!s.running && input.resume) scheduleSuccessor(s)
+        if (opts.syntheticNoId) return { sessionID: input.sessionID, type: "synthetic", delivery: input.delivery ?? "steer", time: { created: 1 } }
+        return { id, sessionID: input.sessionID, type: "synthetic", delivery: input.delivery ?? "steer", time: { created: 1 } }
       },
     },
     permission: {

@@ -4,6 +4,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
+import { formatModelRef } from "../../src/opencode/model.ts"
 import { STRUCTURED_SUBAGENT_PREAMBLE, SUBAGENT_PREAMBLE } from "../../src/opencode/runner.ts"
 import {
   assistantText,
@@ -118,6 +119,9 @@ describe.skipIf(!e2eEnabled())("e2e basic", () => {
       expect(String(info.title)).toStartWith(`[wf:${runId}]`)
       expect(info.metadata?.workflowRunId).toBe(runId)
       expect(info.metadata?.parentSessionID).toBe(r.sessionID)
+      // X18: every agent records the model its child session reports.
+      expect(t.agents.every((a) => typeof a.model === "string" && a.model.includes("/"))).toBe(true)
+      expect(t.agents[0].model).toBe(formatModelRef(info.model))
 
       // P78: a plain child's first user message starts with SUBAGENT_PREAMBLE, the schema child's with
       // STRUCTURED_SUBAGENT_PREAMBLE; both then carry the script's own prompt.

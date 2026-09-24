@@ -91,10 +91,25 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 - **Bundled `/deep-research`**: plans research angles, runs web researchers, has 3 skeptics
   cross-check each claim, and writes a Markdown report with citations.
 - **`/workflows`** progress view and a **`workflow_control`** tool to list, stop, pause, resume and save runs.
+- **Per-agent outputs (extension).** The notification names the agents that returned nothing, and
+  once a run has finished the model can read what each agent returned (`workflow_control` `result`),
+  without touching files.
+- **Steering (extension).** Send an instruction to a running agent without restarting it:
+  `/workflows msg <runId> <agent> <text>`, or ask the model. The agent reads it at its next step.
+- **Live progress tree (extension, TUI).** `ctrl+x o` opens a live tree of the session's runs:
+  phases with their model labels, every agent with its status, the model it runs on, tokens,
+  elapsed time and what it is doing right now. Enter opens an agent's session, `x` stops, `p` pauses, `m` messages it.
+- **The model each agent really ran on (extension).** Every agent records its actual model as
+  `provider/model#variant` (from the script's `model`, else the parent session's model, plus the
+  `effort` variant). It is shown in the tree, in `/workflows <runId>` and `workflow_control` status,
+  and saved in `agents/<i>.json`. If opencode runs an agent on another model than the one requested,
+  the agent gets a warning.
 - **Safe by default.** Workflows start only when you opt in. Scripts run in a sandbox with no
   filesystem, network or shell. Agents inherit your permission rules and never get more.
-- **Tested for parity.** 59 behaviors are each tracked against Claude Code in
-  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test.
+- **Tested for parity.** 60 behaviors are each tracked against Claude Code in
+  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test. The 21 extensions beyond
+  Claude Code (`X01`–`X21`: steering, the live progress tree, per-agent models, the per-agent
+  failure summary and outputs) are specified and tested there the same way.
 
 ## Requirements
 
@@ -207,6 +222,13 @@ but the command exits after the launch turn, so the final answer never reaches y
 the session in the TUI, or run `opencode run -c` (continue the last session) or
 `opencode run -s <sessionID>` to see it.
 
+**Headless (`opencode serve` with no client attached).** Nobody can answer a permission prompt
+there, so a turn that raises one waits until it times out or someone answers. The plugin never asks
+the model to read run files, but a model can still try: the run store is outside the project, so
+opencode asks for `external_directory` approval, and a turn woken by a notification can sit on that
+prompt. In unattended setups, add a rule for the data dir (`deny` is fine: the model then uses
+`workflow_control` `result`) or allow it.
+
 ## Usage
 
 ### Asking for a workflow
@@ -230,7 +252,9 @@ reasoning tokens, no new agent starts. If you give no budget, nothing is capped.
 | Command | What it does |
 |---|---|
 | `/deep-research <question>` | Bundled workflow. It plans research angles, runs one web researcher per angle, extracts claims, has 3 skeptics cross-check each claim and writes a Markdown report with citations. |
-| `/workflows` | Lists this session's runs with per-phase agent counts, tokens and elapsed time. `/workflows <runId>` shows one run agent by agent, including its result. The output appears as a pending message on your next turn. |
+| `/workflows` | Lists this session's runs with per-phase agent counts, model labels, tokens and elapsed time. `/workflows <runId>` shows one run agent by agent, including the model it runs on, its result and, for running agents, what each is doing right now. The output appears as a pending message on your next turn. |
+| `/wf` (TUI) | Opens or closes the [live progress tree](#live-progress-tree-tui) (also `ctrl+x o`). |
+| `/workflows msg <runId> <target> <text>` | Sends an instruction to a running agent without restarting it (see [Steering a running agent](#steering-a-running-agent)). `msg!` also interrupts the agent's current step. |
 | `/workflow-authoring` | Prints the full script API reference the model uses. |
 | `/<name> <args>` | Runs a saved workflow. The rest of the line becomes its `args`. |
 
@@ -241,6 +265,12 @@ header `x-opencode-directory: <project>`, then send another message to see the o
 on Windows, set `MSYS_NO_PATHCONV=1` for arguments that start with `/`, or MSYS rewrites them into
 Windows paths.
 
+**Command output reaches the model too.** opencode has no display-only message, so `/workflows`
+output is a message in the session (it waits in the inbox while the session is idle). The next time
+the session wakes, for example when a run's task notification arrives, the model reads that output
+in a step of its own before the notification, and usually answers briefly ("Noted."). That costs
+one short model step per wake, not per command.
+
 **`/deep-research` needs web search.** The first time `websearch` runs, opencode asks you to choose a
 search provider, and a workflow agent cannot answer that prompt. Run one web search in your own
 session first. If at least half of the researchers report `NO_WEB_ACCESS`, the run stops early and
@@ -250,8 +280,145 @@ tells you so.
 
 The model has a `workflow_control` tool it can use when you ask: "stop that run", "pause the
 workflow", "save it as `audit`". Its actions are `list`, `status`, `stop` (the whole run),
-`stop_agent` (one agent, whose `agent()` returns `null`), `pause`, `resume` and `save`. It only sees
-the current session's runs.
+`stop_agent` (one agent, whose `agent()` returns `null`), `pause`, `resume`, `message` (steer a
+running agent, below), `save` and `result`. It only sees the current session's runs.
+
+**Per-agent outputs (`result`, an extension).** A workflow returns only the script's value, so when
+that value is empty or odd you want to know what each agent said. The task notification helps in two
+ways:
+
+- `<agent-failures>` names the agents whose `agent()` call returned `null` (failed, stopped, or a null
+  value), with the first line of each error, at most 10 of them. This is often enough to explain the
+  result without another call.
+- `<diagnostics>` tells the model to check the agents with `workflow_control` `result` before it
+  diagnoses an empty or unexpected result (Claude Code's own advice, pointed at a tool instead of a
+  file).
+
+`{action: "result", runId}` lists every agent, failed ones first, one line each with a preview of its
+return value or its error, 50 per page. `agent: "3"` (or `"#3"`, or an exact label) shows one agent in
+full: its details (model, usage, prompt, error, steering messages) and its whole return value, 50,000
+characters per page. It works as soon as the run has finished. While the run is still going it only
+repeats the status note, so it cannot be used to peek at partial output. The model reads nothing from
+disk, so there are no permission prompts.
+
+### Steering a running agent
+
+You can redirect an agent while it works, without stopping it and losing what it has done. This is
+an extension: Claude Code's workflows do not have it.
+
+```
+/workflows msg wf_ab12 3 skip the vendor/ folder, focus on src/auth
+/workflows msg wf_ab12 @Research prefer primary sources
+/workflows msg! wf_ab12 "auth scan" answer in French
+```
+
+Or ask the model ("tell the researchers to prefer primary sources"): it calls `workflow_control`
+with `action: "message"`. The model only does this when you ask, and only for its own session's runs.
+In the TUI, select an agent in the [live progress tree](#live-progress-tree-tui) and press `m`:
+
+![The live tree's message dialog, sending "Also end your reply with STEERED-OK." to the running agent #4 slow listener](docs/assets/live-tree-steer.png)
+
+| Target | Meaning |
+|---|---|
+| `3` or `#3` | the agent with index 3 (`#N` in `/workflows <runId>`) |
+| `"auth scan"` | the one agent with exactly this label (quote labels with spaces); an ambiguous label is an error that lists the matching indices |
+| `@Research` or `@"Deep dive"` | every running and queued agent of that phase |
+| `*` | every running and queued agent of the run |
+
+How it behaves:
+
+- **A running agent reads the message at its next step boundary**: after its current model step
+  and that step's tool calls finish. It arrives as an `<orchestrator-message>` block, and the agent's
+  `agent()` result is its reply after the message. A message that arrives just as the agent
+  finishes is still answered, and that answer becomes the result.
+- **`msg!` (urgent)** also interrupts the current step so the agent reads the message right away.
+  The interrupted step's tokens are lost and not counted in the agent's usage.
+- **A message that arrives as the agent finishes** is answered in one more turn, which the plugin
+  starts and waits for, so that answer is the result. In the rare case the message still does not
+  reach the agent, it is marked `undelivered` (with a warning) and stays unread: it never starts a
+  turn after the agent's result was taken.
+- **A queued agent** (not started yet) keeps up to 5 messages and gets them with its first prompt.
+- **Refused** (the reply says why): a finished, failed, stopped or cached agent; an agent between
+  two turns (try again in a moment); a schema agent that already submitted its result; more than
+  20 messages per agent or 4000 characters per message; a run that is not running.
+- **Resume:** messages are saved in `journal.jsonl`, but a resume does not replay them. A steered
+  agent is never reused from cache, so it and every agent after it run again with their original
+  prompts. To make a change stick, edit the script. The task notification and `/workflows <runId>`
+  say which agents were steered.
+
+### Live progress tree (TUI)
+
+In the terminal UI, the plugin adds a live, interactive view of your workflow runs. This is an
+extension beyond Claude Code's workflow tool.
+
+![The live progress tree next to a session: the Scan phase lists the models its agents use, the Report phase shows its meta model label, and each agent row shows the model it runs on (one with the #low effort variant, one on another model) while two agents run slow_step tool calls](docs/assets/live-tree-running.png)
+
+- **Footer.** While a run of the current session is active, the prompt footer shows
+  `wf <name> <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). The home screen
+  shows `wf <n> running`.
+- **Tree.** `ctrl+x o` (or `/wf`, or "Workflows: toggle the live progress tree" in the command
+  palette) opens a panel next to the session: each run, its phases with the `meta.phases[].model`
+  label (or, without one, the model its agents share), agent counts, tokens and elapsed time, and
+  under them every agent with its status, tokens, elapsed time, the model it runs on
+  (`gpt-5.4-mini`, with provider and variant when there is room), and what it is doing right now
+  (`» bash npm test`, the last words it wrote, or `thinking…`). It updates live, at most 4 times a
+  second. In a narrow panel the run id goes first, then a model's provider and variant, then the
+  activity, model labels and agent models, then names are shortened; status, counts, tokens, cost
+  and elapsed time always stay. The footer likewise shortens only the workflow name.
+  ![The tree in a 120-column terminal: the run id is gone; on the rows that don't fit, the agent model loses its provider and is shortened along with the activity, while status, tokens and time stay; #3 was stopped](docs/assets/live-tree-narrow.png)
+- **Models.** Each agent row shows the model the agent runs on, as `provider/model#variant`:
+  `opencode/space-bunny-free#low` is the parent's model with `effort: 'low'`, and an agent with its
+  own `model` shows that model. It is the model opencode reports for the agent's session, so if
+  opencode falls back to another model, the row shows it (and the agent gets a warning). A phase
+  shows its `meta.phases[].model` label when the script declares one, and otherwise the models its
+  agents use. `/workflows <runId>` has the same information as a `model:` line under each agent.
+- **From a workflow agent's own session** the tree and footer show the parent's run, so you can
+  keep controlling it after opening an agent.
+
+Keys in the panel (it has focus when it opens; `ctrl+x ←`/`→` moves focus between the session
+and the panel):
+
+| Key | On | Does |
+|---|---|---|
+| ↑ ↓ (or k j) | any row | move the selection |
+| ← → | run, phase | fold / unfold |
+| Enter | agent | open the agent's child session (in a tab when tabs are on) |
+| Enter | run | open the session that started the run |
+| `x` | agent, run | stop the agent (it counts as failed) or the whole run, after a confirmation |
+| `p` | any row | pause or resume the run |
+| `m` / `M` | agent, phase, run | send a message (`M`: urgent) to that agent, to every running agent of the phase, or to all of them; see [Steering](#steering-a-running-agent) |
+| `a` | any | show this session's runs, or every run of the project |
+| Esc | any | close the panel |
+
+`ctrl+x j` messages a running agent from anywhere (it asks which one when there are several).
+
+| Opening an agent (Enter) | Stopping it (`x`, then confirm) | Finished, with the notification |
+|---|---|---|
+| ![The steered agent's child session: the workflow message arrives between two slow_step calls and its reply ends with STEERED-OK; the tree still tracks the parent run](docs/assets/live-tree-open-agent.png) | ![The stop confirmation for #3 slow stepper](docs/assets/live-tree-stop.png) | ![The parent session answers the task notification; the tree shows the finished run with one stopped and one steered agent](docs/assets/live-tree-done.png) |
+
+The TUI screenshots come from opencode 2.0.15 in Windows conhost, with free `opencode/*` models
+(the parent on `opencode/space-bunny-free`) and a demo tool, `slow_step`, that takes 4 s per call.
+
+**Notifications.** When a run finishes while the terminal is not focused, the TUI sends a desktop
+notification if you enabled opencode's attention notifications in `cli.json` (next to your
+`opencode.json`): `{ "attention": { "notifications": true } }`. Otherwise, or when the terminal does
+not report focus (Windows conhost), you get an in-app toast. Terminals that report focus include
+Windows Terminal, iTerm2 and kitty.
+
+The tree ships with the npm package (`dist/tui.js`) and with directory installs
+(`"plugins": ["file:///…/opencode-workflows"]`, through the repo's `tui.tsx`). A single-file
+loader (`plugins/workflows.js`) loads only the server part: the tree is not available there, but
+`/workflows` and `/workflows msg` work everywhere, including the web UI.
+
+**Scripts and other clients** can read the same data over opencode's server API: the plugin
+registers an RPC named `dynamic-workflows` with `list`, `status` and `control` methods, and
+`delta`/`finished` events on `/api/event`:
+
+```sh
+curl -u opencode:$OPENCODE_PASSWORD -H "content-type: application/json" \
+  -H "x-opencode-directory: <url-encoded project path>" \
+  -d '{"input":{"all":true}}' http://127.0.0.1:<port>/api/rpc/dynamic-workflows/list
+```
 
 ### Saved workflows
 
@@ -266,10 +433,11 @@ have the same name, the closest project directory wins, and project wins over pe
 
 ### Resume
 
-Each run has a transcript directory with `script.js`, `journal.jsonl` (one line per finished agent),
-`run.json` and `agents/<i>.json`. After a stop, a failure or a script edit, ask the model to relaunch
+Each run has a transcript directory with `script.js`, `journal.jsonl` (one line per finished agent,
+in completion order), `run.json` and `agents/<i>.json`. After a stop, a failure or a script edit, ask the model to relaunch
 with `resumeFromRunId`. The longest unchanged prefix of `agent()` calls returns cached results at
-once. Everything from the first changed or unfinished call onward runs live.
+once. Everything from the first changed or unfinished call onward runs live. A cached agent keeps
+the model it ran on in the original run.
 
 ## Script API
 
@@ -300,6 +468,7 @@ Plugin options (config install only, see [Install](#other-options)):
 | `disabled: true` | Registers no tools or commands. |
 | `sizeGuideline` | `unrestricted`, `small`, `medium` (default) or `large`: tells the model to aim for fewer than ∞, 5, 10 or 50 agents. |
 | `dataDir` | Where run transcripts are stored. Takes precedence over `OPENCODE_WORKFLOW_DATA_DIR`. |
+| `rpcControl: false` | Makes the live tree's RPC read-only: the tree still shows runs, but its `x`, `p` and `m` keys (and any other RPC client) cannot stop, pause or message them. `/workflows msg` and `workflow_control` still work. See [Security model](#security-model). |
 
 ## Environment variables
 
@@ -312,19 +481,24 @@ Set them in the environment of the opencode server. They work with every install
 | `OPENCODE_WORKFLOW_SIZE_GUIDELINE` | `medium` | Same as the `sizeGuideline` option. The env var wins. |
 | `OPENCODE_WORKFLOW_AGENT_TIMEOUT_MS` | unset (no timeout) | Per-agent timeout. An agent that exceeds it fails, and `agent()` returns `null`. |
 | `MAX_STRUCTURED_OUTPUT_RETRIES` (or `OPENCODE_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES`) | `5` | Attempts a schema agent gets before `agent()` throws. |
+| `OPENCODE_WORKFLOW_RPC_CONTROL` | unset (on) | `0`, `false`, `no` or `off` makes the live tree's RPC read-only, like the `rpcControl: false` option. |
 | `OPENCODE_WORKFLOW_DATA_DIR` | `$XDG_DATA_HOME/opencode/workflows`, else `%LOCALAPPDATA%\opencode\workflows` (Windows) or `~/.local/share/opencode/workflows` | Run transcripts, stored as `<dir>/<sessionID>/<runId>/`. The `dataDir` plugin option wins over it. |
 
 ## How it compares to Claude Code
 
 Behavior follows Claude Code's [dynamic workflows](https://code.claude.com/docs/en/workflows) item by
-item. [`docs/PARITY.md`](docs/PARITY.md) lists each of the 59 behaviors with its status and the tests
+item. [`docs/PARITY.md`](docs/PARITY.md) lists each of the 60 behaviors with its status and the tests
 that check it:
 
 | Status | Count | Meaning |
 |---|---|---|
 | FULL | 46 | Same behavior |
 | DEGRADED | 12 | Works, with a documented limitation |
+| ADAPTED | 1 | Same purpose, reached another way |
 | N/A | 1 | Cannot be done as an opencode plugin |
+
+The same file specifies the 21 extensions (status `EXT`, `X01`–`X21`): steering, the live progress
+tree and its RPC, the per-agent model display, and the per-agent failure summary and outputs.
 
 Most of the gaps come from one limit of opencode's plugin API: **a plugin cannot create a child
 session with a `parentID`**. So workflow agents aren't nested under your session in the UI, and
@@ -338,7 +512,7 @@ opencode never shows their permission prompts. Upstream work to expose this:
 | P21 | Structured output | DEGRADED | opencode has no forced tool choice, so agents submit through a `workflow_submit` tool, with validation retries. |
 | P26 | `effort` | DEGRADED | Mapped to a model variant when the model has one, otherwise ignored with a warning. |
 | P34 | `budget` | DEGRADED | One pool per run, counting the run's agents' output and reasoning tokens. The parent session's own tokens are not counted. |
-| P50 | `/workflows` view | DEGRADED | A text view that appears on your next turn, not an interactive tree. |
+| P50 | `/workflows` view | DEGRADED | A text view that appears on your next turn. In the TUI, the [live progress tree](#live-progress-tree-tui) is interactive (an extension). |
 | P56 | Approval before a run | DEGRADED | Plugins cannot ask. Set an opencode permission rule of `ask` on the `workflow` tool. |
 | P61 | Permission inheritance | DEGRADED | Rules are copied when the child session is created. |
 | P62 | Child session nesting | DEGRADED | Children are tagged `[wf:<runId>]` instead of being nested. |
@@ -348,6 +522,7 @@ opencode never shows their permission prompts. Upstream work to expose this:
 | P73 | Restart one agent | DEGRADED | Use `stop_agent`, or stop the run and resume it. |
 | P74 | Open an agent's transcript | DEGRADED | Open its tagged child session. `agents/<i>.json` holds its `sessionID`. |
 | P76 | `scriptPath` permission checks | DEGRADED | An "ask" counts as refused. |
+| P79 | Per-agent results named in the notification | ADAPTED | Claude Code points at `journal.jsonl`. Here `<diagnostics>` points at `workflow_control` `result`, because the run store is outside the project (a permission prompt per read) and opencode's `read` cuts long lines. |
 
 Also:
 
@@ -355,6 +530,25 @@ Also:
   never mid-turn.
 - **Workflow agents cannot ask you anything.** Put everything an agent needs in its prompt, and
   allow the tools it needs through opencode permission rules.
+- **Steering is not instant.** An agent reads a message at its next step boundary, after its current
+  model step and tool calls finish (`msg!` interrupts the step and loses its tokens). Resume does
+  not replay messages: steered agents run again with their original prompts.
+- **The live tree needs the plugin's TUI part.** The npm package and directory installs have it; a
+  single-file loader and the web UI do not (use `/workflows` there). Desktop notifications need a
+  terminal that reports focus; Windows conhost gets a toast instead.
+- **A long workflow result is not clipped.** The notification carries the script's whole return value;
+  a very large one (100 KB and more) costs tens of thousands of tokens in the parent. Return a summary
+  and keep bulk data in the agents: the model can read them with `workflow_control` `result`.
+- **A refused `agent()` call leaves no trace.** A call refused before the agent starts (token budget
+  spent, the 1000-agent cap, an invalid schema) throws in the script. Uncaught, it fails the run with
+  that error. Inside `parallel()`/`pipeline()` it becomes a `null` that neither the failure summary nor
+  `result` lists.
+- **Polling and relaunching are model habits.** The tool descriptions tell the model to end its turn
+  after launching and not to relaunch unasked. Some small models (seen with a free nemotron) still
+  call `status` a few times while a run is going, or relaunch a failed run. A model that reads a
+  finished run's agents before its notification arrives may also report twice.
+- **The model shown is the one opencode reports** for the agent's session. Until the child session
+  exists, an agent shows only the model its script names (`model` option), or none.
 
 ## Security model
 
@@ -371,7 +565,38 @@ Also:
 - **`scriptPath` reads only files you could read anyway**: the project, this session's runs and the
   personal workflows directory, plus directories an `external_directory` allow rule covers. Symlinks
   are resolved first, `read` deny rules apply, and UNC or device paths are refused.
-- **Runs are private to their session.** Another session's run id answers "not found".
+- **Runs are private to their session.** Another session's run id answers "not found". This covers
+  `workflow_control` `result` too: the parent model sees its own runs' agent outputs, and workflow
+  agents cannot call it.
+- **The model never needs to read the run store.** Agent outputs reach it through `result`, not files.
+  The run store is outside your project, so if a model reads it anyway, opencode's `read` asks for
+  `external_directory` approval as usual. The notification tells the model not to read it with shell
+  commands, but only your permission rules actually enforce that.
+- **Steering needs the same access.** Only the user of the parent session (`/workflows msg`) and the
+  parent model (`workflow_control`, when you ask) can message a run's agents. Workflow agents
+  cannot: `workflow_control` is denied in every child. A message is plain text framed as
+  `<orchestrator-message>`; it cannot change an agent's tool permissions, and a message cannot fake
+  or close that frame, or pass for another tag such as `<system-reminder>`: tags inside it are
+  escaped, after look-alike characters (fullwidth `＜`, zero-width spaces) are folded.
+- **The live tree's RPC has the server API's trust, within one project.** The `dynamic-workflows`
+  RPC (`list`, `status`, `control`) answers only for the runs of its own project (Location); another
+  project's runs are unknown to it, live or on disk. Inside the project its `control` (stop, pause,
+  message) is not limited to one session, the same as the TUI itself. The model-facing
+  `workflow_control` tool and the slash commands stay limited to the current session's runs.
+  - The RPC needs opencode's server password, like the rest of the server API (which can already
+    read and prompt every session). opencode always sets one: yours (`OPENCODE_PASSWORD`), or a
+    random one it hands to the TUI and web UI (the background service keeps it in its own config).
+  - **Anything that knows that password can steer or stop runs.** The RPC cannot tell the TUI from
+    `curl`, so its messages are recorded as `via: "rpc"` and reach the agent as
+    `<orchestrator-message from="user">`. A workflow agent cannot use the plugin's tools for this,
+    but an agent with shell access could, if it can read the password: for example an
+    `OPENCODE_PASSWORD` exported in the shell that started opencode, or the service's config file.
+    If you run untrusted or prompt-injectable workflows, do not export the password where agents
+    inherit it, and consider `OPENCODE_WORKFLOW_RPC_CONTROL=0` (or the `rpcControl: false` option):
+    the tree stays live but read-only, and `/workflows msg` still works.
+  - **Other plugins run in the same process with full rights.** One of them could register its own
+    `dynamic-workflows` RPC (the last registration wins), read what the tree sends, or send fake
+    events. Only install plugins you trust; this plugin does not try to defend against them.
 - **Saving never writes through symlinks.**
 
 Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
@@ -383,7 +608,8 @@ agents, and a big fan-out can use many times the tokens of a single chat. For ex
 [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md) used 6 agents and about 155k tokens.
 
 - Agents use the parent session's model unless the script sets `model`. A script can pick a cheaper
-  model or `effort: 'low'` for mechanical stages.
+  model or `effort: 'low'` for mechanical stages. The tree and `/workflows <runId>` show which model
+  each agent actually ran on.
 - A run with more than 25 agents gets a large-workflow warning (advisory only). With
   `sizeGuideline`, the threshold is that guideline's count.
 - Hard limits per run: at most `min(16, CPUs - 2)` agents at once (extra calls queue), 1000 agents in
@@ -403,6 +629,11 @@ agents, and a big fan-out can use many times the tokens of a single chat. For ex
 | `plugin list` prints `No plugins found` right after an install | The service is still loading the plugin. Run it again after a few seconds. |
 | `EPERM: operation not permitted, rename` during `plugin add` (Windows) | A file lock (often antivirus) in opencode's npm cache. Run the same command again. |
 | The notification arrives late | Notifications are queued after your current turn, by design. |
+| The result is empty or `null` and you want to know why | Ask the model what the agents returned. It uses `workflow_control` `result`, which lists failed agents first. You can also look yourself with `/workflows <runId>`. |
+| opencode asks for `external_directory` access to the workflows data dir | The model tried to read run files. Deny it: `workflow_control` `result` gives the same data without a prompt. |
+| A headless `opencode serve` turn hangs after a run finishes | A permission prompt is waiting and no client is attached to answer it (often an `external_directory` read of the data dir). Answer it through the API, or add a `deny`/`allow` rule for the data dir. |
+| The model calls `workflow_control status` over and over while a run is going | Model habit: status never returns the result, and from the second call it says repeating does not help. Tell it to wait for the notification. |
+| The model relaunched a failed run without being asked | Model habit (some small models do it). The failed-run notification says to retry only if you ask; tell it not to relaunch. |
 | An agent fails with "workflow agents cannot ask for approval" | Add an opencode `allow` rule for the tool or directory it needs. |
 | `/deep-research` stops with `NO_WEB_ACCESS` | Run one web search in your own session first to pick a provider. |
 
@@ -436,6 +667,14 @@ Usually yes: the script API is the same. See [docs/PARITY.md](docs/PARITY.md) fo
 **Where are runs stored?**
 In the `dataDir` plugin option if set, else in `OPENCODE_WORKFLOW_DATA_DIR`, else in the default data
 directory (see [Environment variables](#environment-variables)), as `<sessionID>/<runId>/`.
+
+**How do I see what one agent returned?**
+Ask the model after the run has finished, for example "what did the `review-auth` agent say?". It
+calls `workflow_control` with `{action: "result", runId, agent: "review-auth"}`, where `agent` is the
+index (`"3"` or `"#3"`) or the exact label. Without `agent` it lists every agent, failed ones first.
+The notification already names the agents that returned `null`, with their error. You can also look
+yourself: `/workflows <runId>` shows each agent's result as one line, the live tree opens its child
+session, and `agents/<i>.json` in the run directory holds the full record.
 
 ## Development and contributing
 

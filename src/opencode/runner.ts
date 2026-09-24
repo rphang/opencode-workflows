@@ -8,6 +8,13 @@
 // to JSON found in the last reply. Abort (P23) interrupts the child. Worktree isolation (P28) uses
 // ctx.worktree and removes the worktree afterwards when git shows no changes.
 // Every child prompt starts with SUBAGENT_PREAMBLE, or STRUCTURED_SUBAGENT_PREAMBLE for schema agents (P78).
+// Steering (X01–X04, X08; design §A.4): the request's mailbox is attached once the child exists. Held
+// messages are appended to the first prompt. While a turn runs the window is open and each message is
+// sent with session.synthetic({delivery:"steer", resume:false}) (plus interrupt({resume:true}) when
+// urgent). When wait() resolves the window is closed and each sent message is looked up in context().
+// One that missed the turn is parked (resume:false wakes nothing), so the runner wakes the session
+// with interrupt({resume:true}) and waits for that successor turn before it reads the result. A
+// message it gives up on stays parked and never starts a turn nobody reads.
 // Live-verified shapes: docs/OPENCODE-API-NOTES.md.
 
 import { execFile } from "node:child_process"
@@ -19,9 +26,10 @@ import {
   SUBMIT_TOOL_NAME,
   validateOutput,
 } from "../schema.ts"
+import type { AgentMessage } from "../mailbox.ts"
 import type { AgentOutcome, AgentRecord, AgentRequest, AgentRunner, Json, TokenUsage } from "../types.ts"
 import { ZERO_USAGE } from "../types.ts"
-import { resolveChildModel, type ModelRef } from "./model.ts"
+import { formatModelRef, resolveChildModel, type ModelRef } from "./model.ts"
 import {
   CHILD_DENIED_INTERACTIVE_TOOLS,
   evaluatePermission,
@@ -29,6 +37,7 @@ import {
   type AgentInfo,
   type PermissionRule,
 } from "./permissions.ts"
+import { formatOrchestratorMessage, STEERING_PREAMBLE_LINE } from "./steer.ts"
 import { createSubmitRegistry, type SubmitRegistry } from "./submit.ts"
 
 export type { PermissionRule } from "./permissions.ts"
@@ -62,6 +71,7 @@ export const SUBAGENT_PREAMBLE = [
     "requested content, in the requested format: no greetings, no follow-up offers. Mention an assumption only if the " +
     "requested format has room for it.",
   PREAMBLE_NO_WORKFLOWS,
+  STEERING_PREAMBLE_LINE,
   "Your task:",
 ].join("\n")
 
@@ -72,6 +82,7 @@ export const STRUCTURED_SUBAGENT_PREAMBLE = [
   "- Your answer is your workflow_submit call (see the required output format after the task): its `output` is " +
     "returned to the script as data. Put any assumption inside that output only if its schema has room for it.",
   PREAMBLE_NO_WORKFLOWS,
+  STEERING_PREAMBLE_LINE,
   "Your task:",
 ].join("\n")
 
@@ -172,6 +183,11 @@ function lastAssistantError(messages: any[]): string | undefined {
 
 type StopReason = "abort" | "timeout"
 
+/** Backoff between the post-turn delivery checks (design §A.4); ~2 s in total. */
+export const STEER_VERIFY_DELAYS_MS: readonly number[] = [0, 50, 150, 300, 600, 900]
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
 export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunnerOptions): AgentRunner {
   const registry = options.registry ?? createSubmitRegistry(ctx.storage)
   const git = options.git ?? defaultGit
@@ -267,6 +283,27 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
       let usage: TokenUsage = ZERO_USAGE
       const schema = request.opts.schema
 
+      /**
+       * The model the agent runs on (X18): what the child session reports, else what was requested.
+       * Reported via onUpdate when it is first known and whenever a later get() shows another one (an
+       * opencode fallback); a session model that differs from the request is noted once per model.
+       */
+      let requestedModel: string | undefined
+      let currentModel: string | undefined
+      const mismatchWarned = new Set<string>()
+      const noteModel = (sessionModel: unknown) => {
+        const actual = formatModelRef(sessionModel)
+        const model = actual ?? currentModel ?? requestedModel
+        if (actual && requestedModel && actual !== requestedModel && !mismatchWarned.has(actual)) {
+          mismatchWarned.add(actual)
+          warn(`model: requested ${requestedModel} but the agent runs on ${actual}`)
+        }
+        if (model && model !== currentModel) {
+          currentModel = model
+          update({ model })
+        }
+      }
+
       const refreshUsage = async () => {
         if (!sessionID) return
         try {
@@ -276,7 +313,111 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         }
       }
 
+      const mailbox = request.mailbox
+      let urgentWarned = false
+      /**
+       * Sends one steering message to the child (X01, X08). Resolves with the context message id ("" when
+       * opencode returned none). resume:false: the item is read at the running turn's next step boundary,
+       * and one that arrives after the last boundary stays parked instead of waking the session by itself;
+       * settleMessages() decides whether to start the turn that reads it, so no turn ever runs unread.
+       */
+      const sendSteer = async (m: AgentMessage): Promise<{ id: string }> => {
+        const res = (await ctx.session.synthetic({
+          sessionID: sessionID!,
+          text: formatOrchestratorMessage(m),
+          description: `workflow message (${m.from})`,
+          metadata: { workflowRunId: request.runId, workflowAgentIndex: request.index, workflowMessageId: m.id },
+          delivery: "steer",
+          resume: false,
+        } as any)) as { id?: string } | undefined
+        if (m.urgent) {
+          try {
+            await ctx.session.interrupt({ sessionID: sessionID!, resume: true } as any)
+          } catch {
+            // already idle: the message wakes it (resume:true)
+          }
+          if (!urgentWarned) {
+            urgentWarned = true
+            warn("an urgent message interrupted the agent's current step; that step's tokens are not counted in its usage")
+          }
+        }
+        return { id: String(res?.id ?? "") }
+      }
+      /** Schema agents: a message can no longer change an accepted submission (X02). */
+      const submittedGuard = async () => ((await registry.read(sessionID!))?.accepted ? ("submitted" as const) : undefined)
+
+      /** Waits for the child to go idle, or the stop signal. */
+      const idle = async (): Promise<boolean> => {
+        const done = await Promise.race([ctx.session.wait({ sessionID: sessionID! }).then(() => "idle" as const), stopped])
+        return done === "idle" && !stopReason
+      }
+
+      /**
+       * Wakes the idle child for its parked steer items: opencode's interrupt({resume:true}) interrupts
+       * nothing on an idle session but starts a successor turn when a steer item is pending (and does
+       * nothing when none is). The successor execution is registered at once, so the next wait() covers it.
+       */
+      const wake = async () => {
+        try {
+          await ctx.session.interrupt({ sessionID: sessionID!, resume: true } as any)
+        } catch {
+          // gone: the verification below reports the messages undelivered
+        }
+      }
+
+      /**
+       * Closes the steer window after a turn (design §A.4). Every message sent in it must show up in the
+       * child's context. One that arrived after the turn's last step boundary is parked (resume:false), so
+       * the runner starts the successor turn that reads it and waits for that turn before the result is
+       * read. A message it still cannot find is reported undelivered and stays parked: it never starts a
+       * turn later, so nothing runs unread and no tokens escape the agent's usage. A send whose id is
+       * unknown cannot be checked in context(): it gets the same wake and one extra wait, and stays "sent".
+       * Returns false when stopped.
+       */
+      const settleMessages = async (): Promise<boolean> => {
+        if (!mailbox) return true
+        const sent = await mailbox.close()
+        if (!sent.length) return true
+        // message id → context message id (keyed by message id: several sends may lack a delivery id).
+        const pending = new Map<string, string>()
+        let unverifiable = 0
+        for (const s of sent) {
+          if (s.deliveryId) pending.set(s.id, s.deliveryId)
+          else unverifiable++
+        }
+        const check = async () => {
+          if (!pending.size) return
+          const ids = new Set(((await ctx.session.context({ sessionID: sessionID! }).catch(() => [])) as any[]).map((m) => m?.id))
+          for (const [id, deliveryId] of [...pending]) {
+            if (ids.has(deliveryId)) {
+              pending.delete(id)
+              mailbox.report(id, "delivered")
+            }
+          }
+        }
+        if (!(await idle())) return false
+        await check()
+        if (pending.size || unverifiable) {
+          await wake()
+          for (const delay of STEER_VERIFY_DELAYS_MS) {
+            if (delay) await sleep(delay)
+            if (!(await idle())) return false
+            await check()
+            if (!pending.size && (!unverifiable || delay > 0)) break
+          }
+        }
+        // The reply to a delivered message may still be streaming: wait once more before reading.
+        if (!(await idle())) return false
+        if (pending.size) {
+          const lost = [...pending.keys()]
+          for (const id of lost) mailbox.report(id, "undelivered")
+          warn(`message(s) ${lost.join(", ")} were not delivered before the agent finished; they stay unread in its session`)
+        }
+        return true
+      }
+
       const stoppedOutcome = async (): Promise<AgentOutcome> => {
+        mailbox?.seal()
         if (sessionID) {
           try {
             await ctx.session.interrupt({ sessionID })
@@ -294,12 +435,18 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
       }
 
       /** One prompt/wait turn. Returns a terminal outcome, or undefined when the turn succeeded. */
-      const turn = async (text: string): Promise<AgentOutcome | undefined> => {
+      const turn = async (text: string, onPrompted?: () => void): Promise<AgentOutcome | undefined> => {
         await ctx.session.prompt({ sessionID: sessionID!, text })
+        onPrompted?.()
+        // The window opens once the prompt is in: a steer sent before it could wake the idle session
+        // into a turn of its own.
+        mailbox?.open()
         const done = await Promise.race([ctx.session.wait({ sessionID: sessionID! }).then(() => "idle" as const), stopped])
         if (done !== "idle" || stopReason) return stoppedOutcome()
+        if (!(await settleMessages())) return stoppedOutcome()
         const info = (await ctx.session.get({ sessionID: sessionID! })) as any
         usage = usageOf(info)
+        noteModel(info?.model)
         if (info?.outcome === "failed") {
           const messages = (await ctx.session.context({ sessionID: sessionID! }).catch(() => [])) as any[]
           return {
@@ -383,10 +530,24 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         })) as { id: string }
         sessionID = created.id
         update({ sessionID })
+        requestedModel = formatModelRef(resolved.model)
+        let sessionModel = (created as { model?: unknown }).model
+        if (!formatModelRef(sessionModel)) {
+          sessionModel = ((await ctx.session.get({ sessionID }).catch(() => undefined)) as { model?: unknown } | undefined)?.model
+        }
+        noteModel(sessionModel)
         if (stopReason) return stoppedOutcome()
 
+        // Messages sent while the agent was queued go into its first prompt (X04).
+        const held = mailbox?.attach(sendSteer, schema ? submittedGuard : undefined) ?? []
+        const withHeld = (text: string) => (held.length ? `${text}\n\n${held.map(formatOrchestratorMessage).join("\n\n")}` : text)
+        const reportHeld = () => {
+          for (const m of held) mailbox?.report(m.id, "delivered")
+        }
+
         if (!schema) {
-          const end = await turn(childPrompt(request.prompt))
+          const first = withHeld(childPrompt(request.prompt))
+          const end = await turn(first, reportHeld)
           if (end) return end
           const messages = (await ctx.session.context({ sessionID })) as any[]
           const text = lastAssistantText(messages)
@@ -398,10 +559,12 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         await registry.register(sessionID, schema)
         const max = maxStructuredRetries()
         let missed = 0
-        let prompt = `${childPrompt(request.prompt, true)}\n\n${structuredOutputInstructions(schema)}`
+        let prompt = withHeld(`${childPrompt(request.prompt, true)}\n\n${structuredOutputInstructions(schema)}`)
+        let firstTurn = true
         for (;;) {
           const before = (await registry.read(sessionID))?.failures ?? 0
-          const end = await turn(prompt)
+          const end = firstTurn ? await turn(prompt, reportHeld) : await turn(prompt)
+          firstTurn = false
           if (end) return end
           const state = await registry.read(sessionID)
           if (state?.accepted) return { status: "completed", value: state.accepted.value as Json, usage, sessionID }
@@ -445,6 +608,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         await refreshUsage()
         return { status: "failed", error: errMsg(e), usage, sessionID }
       } finally {
+        mailbox?.seal()
         signal.removeEventListener("abort", onAbort)
         if (timer) clearTimeout(timer)
         if (sessionID && schema) await registry.unregister(sessionID).catch(() => {})

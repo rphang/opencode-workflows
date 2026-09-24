@@ -106,7 +106,7 @@ describe("P75 run management is scoped to the launching session", () => {
     const p = await h.setup({ runner })
     const out = await p.call({ script: script(`log("SECRET-TOKEN-123"); return await agent("held")`, `{ name: "secret", description: "s" }`) })
     await runner.waitForHeld(1)
-    for (const action of ["status", "stop", "pause", "resume", "save"]) {
+    for (const action of ["status", "stop", "pause", "resume", "save", "result"]) {
       const msg = await p.control({ action, runId: out.runId }, OTHER)
       expect(msg).toMatch(/not found in this session/)
       expect(msg).not.toContain("SECRET-TOKEN-123")

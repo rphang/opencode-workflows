@@ -7,6 +7,9 @@
 //   const n = await p.notification(0)            // waits for the i-th <task-notification>
 //   p.resultOf(n)                                // parsed <result> (JSON, or the raw string)
 //   await h.dispose()                            // cleanup (stops runs, removes temp dirs)
+//
+// Live tree (X10–X16): the fake ctx also has `rpc.register` (p.rpc() returns the registered handlers,
+// p.rpcEvents the emitted events) and `event.subscribe` (p.pushEvent(e) feeds the global event stream).
 
 import { mkdirSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
@@ -67,8 +70,57 @@ export function tag(text: string, name: string): string | undefined {
   return m?.[1]
 }
 
+/** A pushable async event stream (ctx.event.subscribe). */
+function eventStream() {
+  const subscribers = new Set<{ queue: any[]; wake?: () => void; done: boolean }>()
+  return {
+    push(e: any) {
+      for (const s of subscribers) {
+        s.queue.push(e)
+        s.wake?.()
+      }
+    },
+    subscribers: () => subscribers.size,
+    subscribe(options?: { signal?: AbortSignal }): AsyncIterable<any> {
+      const sub = { queue: [] as any[], wake: undefined as (() => void) | undefined, done: false }
+      subscribers.add(sub)
+      const end = () => {
+        sub.done = true
+        subscribers.delete(sub)
+        sub.wake?.()
+      }
+      options?.signal?.addEventListener("abort", end, { once: true })
+      return {
+        [Symbol.asyncIterator]: () => ({
+          async next() {
+            for (;;) {
+              if (sub.queue.length) return { done: false, value: sub.queue.shift() }
+              if (sub.done) return { done: true, value: undefined }
+              await new Promise<void>((r) => (sub.wake = r))
+              sub.wake = undefined
+            }
+          },
+          async return() {
+            end()
+            return { done: true, value: undefined }
+          },
+        }),
+      }
+    },
+  }
+}
+
+export interface RpcRegistration {
+  definition: any
+  handlers: Record<string, (input: any, context?: any) => Promise<any>>
+  disposed: boolean
+}
+
 function makePluginCtx(opts: FakeCtxOptions & { options?: Record<string, unknown> } = {}) {
   const fake = createFakeCtx(opts)
+  const rpcRegs: RpcRegistration[] = []
+  const rpcEvents: { name: string; data: any; at: number }[] = []
+  const events = eventStream()
   const toolCbs: ((e: any) => void)[] = []
   const commandCbs: ((e: any) => void)[] = []
   const synthetic: any[] = []
@@ -92,6 +144,9 @@ function makePluginCtx(opts: FakeCtxOptions & { options?: Record<string, unknown
   const session = {
     ...fake.ctx.session,
     async synthetic(input: any) {
+      // Steering messages to a workflow child go to the fake session (its inbox model, X01–X08);
+      // everything shown in the parent (notifications, /workflows output) is recorded here.
+      if (input?.sessionID !== fake.parentID && fake.sessions.has(input?.sessionID)) return fake.ctx.session.synthetic(input)
       synthetic.push(input)
       return { id: `syn_${synthetic.length}`, sessionID: input.sessionID, type: "synthetic" }
     },
@@ -112,6 +167,25 @@ function makePluginCtx(opts: FakeCtxOptions & { options?: Record<string, unknown
       },
       async reload() {},
     },
+    rpc: {
+      async register(definition: any, handlers: any) {
+        const reg: RpcRegistration = { definition, handlers, disposed: false }
+        rpcRegs.push(reg)
+        return {
+          events: {
+            emit: async (name: string, data: any) => {
+              if (!reg.disposed) rpcEvents.push({ name, data, at: Date.now() })
+            },
+          },
+          dispose: async () => {
+            reg.disposed = true
+          },
+        }
+      },
+    },
+    event: {
+      subscribe: (options?: { signal?: AbortSignal }) => events.subscribe(options),
+    },
     command: {
       async transform(cb: (e: any) => void) {
         commandCbs.push(cb)
@@ -131,6 +205,13 @@ function makePluginCtx(opts: FakeCtxOptions & { options?: Record<string, unknown
     ctx: ctx as any,
     synthetic,
     prompts,
+    rpcRegs,
+    rpcEvents,
+    /** The active RPC registration (the plugin registers one per setup). */
+    rpc: () => rpcRegs.filter((r) => !r.disposed).at(-1),
+    /** Feeds one event to every ctx.event.subscribe() stream. */
+    pushEvent: (e: any) => events.push(e),
+    eventSubscribers: () => events.subscribers(),
     tools: () => collect<Registered>(toolCbs),
     commands: () => collect<RegisteredCommand>(commandCbs),
     reloads: () => reloads,
@@ -147,6 +228,8 @@ export interface SetupOptions {
   env?: Record<string, string>
   options?: Record<string, unknown>
   deps?: Partial<PluginDeps>
+  /** Adjusts the fake plugin ctx before setup (e.g. delete ctx.rpc to model an older opencode). */
+  ctx?: (ctx: any) => void
 }
 
 export type Plugged = Awaited<ReturnType<Harness["setup"]>>
@@ -208,6 +291,12 @@ function extend(p: ReturnType<typeof makePluginCtx>, runner: FakeRunner, cleanup
     async settled(runId: string, ms = 10000) {
       await waitFor(() => !isRunActive(runId), `run ${runId} settled`, ms)
     },
+    /** Calls an RPC method of the plugin's dynamic-workflows registration. */
+    async rpcCall(method: string, input: any = {}): Promise<any> {
+      const reg = p.rpc()
+      if (!reg) throw new Error("no RPC registered")
+      return reg.handlers[method]!(input, { signal: new AbortController().signal, error: (type: string, message: string) => ({ type, message }) })
+    },
     async command(name: string, text = "", sessionID = SESSION) {
       const cmd = p.commands().get(name)
       if (!cmd) throw new Error(`no command /${name}`)
@@ -233,6 +322,7 @@ export async function createHarness(): Promise<Harness> {
     store: new RunStore({ root: dataDir }),
     async setup(opts: SetupOptions = {}) {
       const p = makePluginCtx({ directory: projectDir, options: opts.options, ...opts.fake })
+      opts.ctx?.(p.ctx)
       const runner = opts.runner ?? new FakeRunner()
       const createRunner: PluginDeps["createRunner"] = opts.real
         ? ({ ctx, parentSessionID, parentAgent, runId, registry }) =>

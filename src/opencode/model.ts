@@ -147,3 +147,16 @@ export async function resolveChildModel(ctx: ModelContext, input: ResolveModelIn
   if (model && model.variant === undefined) delete model.variant
   return { model, warnings }
 }
+
+/**
+ * `provider/model#variant` for a session model ref (X18); the variant only when one is set. opencode
+ * gives a session without an explicit variant the variant "default", which is shown as none. Undefined
+ * when `ref` is not a model ref.
+ */
+export function formatModelRef(ref: unknown): string | undefined {
+  if (!ref || typeof ref !== "object") return undefined
+  const { providerID, id, variant } = ref as Partial<ModelRef>
+  if (typeof providerID !== "string" || !providerID || typeof id !== "string" || !id) return undefined
+  const v = typeof variant === "string" && variant && variant !== "default" ? `#${variant}` : ""
+  return `${providerID}/${id}${v}`
+}

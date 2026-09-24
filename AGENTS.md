@@ -17,9 +17,14 @@ the repo).
 - Do not add dependencies without discussing it first. Dependencies: `@opencode/codemode`,
   `@opencode/plugin` (use **`import type` only** from it — the runtime does not need it),
   `acorn`, `ajv`, `effect`, all pinned to opencode 2.0.15 (`effect` must stay the exact version
-  `@opencode/codemode` depends on, so both share one copy).
+  `@opencode/codemode` depends on, so both share one copy). The TUI build adds devDependencies only
+  (`@opentui/core`, `@opentui/solid` 0.5.10 and `solid-js` 1.9.15, opencode 2.0.15's catalog, with an
+  npm `overrides` for `solid-js` like opencode's own); the TUI provides them at runtime.
 - The engine (`src/engine.ts` and friends) is host-agnostic. Everything opencode-specific lives in
   `src/opencode/`. Engine tests use the fake runner in `tests/helpers/`.
+- The TUI companion (live progress tree) lives in `src/tui/`: `store.ts` is pure and unit-tested; the
+  `.tsx` files only render. The server entry (`src/index.ts`) must never import it. `dist/tui.js` is
+  built by `scripts/build-tui.ts` with the host modules external.
 - Every PARITY ID needs a test in `tests/parity/` whose name starts with the ID.
 - Plain TypeScript, ESM. Bun loads `.ts` directly in development; `npm run build` produces the
   published `dist/` bundle.
@@ -43,9 +48,13 @@ repo (`.sandbox/` is git-ignored):
 
 ```sh
 export XDG_DATA_HOME=$PWD/.sandbox/data XDG_CONFIG_HOME=$PWD/.sandbox/config \
-       XDG_STATE_HOME=$PWD/.sandbox/state XDG_CACHE_HOME=$PWD/.sandbox/cache
+       XDG_STATE_HOME=$PWD/.sandbox/state XDG_CACHE_HOME=$PWD/.sandbox/cache \
+       OPENCODE_TEST_HOME=$PWD/.sandbox   # else opencode also loads this repo's AGENTS.md
 npx opencode2 run --standalone --auto --format json -m openai/gpt-5.4-mini "..."
 ```
+
+Do not edit `src/` while a live run is in progress: opencode reloads the plugin when its source
+files change.
 
 The automated suite does this for you: `OPENCODE_E2E=1 npx bun test tests/e2e --timeout 600000`
 with `OPENAI_API_KEY` set (see `docs/E2E.md`). Child sessions default to a free `opencode/*`
@@ -63,8 +72,11 @@ messages; assistant messages are `{type:"assistant", content:[{type:"text", text
 
 ## Docs map
 
-- `docs/PARITY.md` — behavior spec, one ID per behavior, each with a parity test.
+- `docs/PARITY.md` — behavior spec, one ID per behavior, each with a parity test (`P` = Claude Code
+  parity, `X` = extensions marked `EXT`).
 - `docs/E2E.md` — live test harness, known gotchas, the demo script.
 - `docs/OPENCODE-API-NOTES.md` — observed opencode 2.0.15 plugin API behavior.
+- `docs/design/` — approved designs for features beyond Claude Code (steering, live progress tree)
+  and design decisions such as how the parent model sees per-agent outputs (`agent-output-access.md`).
 - `docs/notes/` — maintainer notes and drafts (not published anywhere).
 - `docs/assets/` — images used by the README.

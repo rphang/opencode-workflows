@@ -25,17 +25,23 @@
 // {status:"schema_failed", error:"structured output failed validation after N attempts: ..."},
 // mirroring the real runner (disable with `validateSchema: false`).
 //
+// Steering (X01–X04): when the request has a mailbox, the fake attaches a sender, reports held
+// messages delivered with the "first prompt", opens the window while it works and closes it
+// (reporting sent messages delivered) before it computes the value. `value(req, messages)` sees
+// every message the agent received; `runner.steers` records them.
+//
 // Abort: every behaviour honours request.signal. An aborted agent resolves {status:"stopped"}
 // (after `lingerMs`, to simulate a child process that has not exited yet — P43), unless
 // `ignoreAbort` is set, in which case it finishes normally.
 
 import { validateOutput, maxStructuredRetries } from "../../src/schema.ts"
+import type { AgentMessage } from "../../src/mailbox.ts"
 import type { AgentOutcome, AgentRequest, AgentRunner, Json, TokenUsage } from "../../src/types.ts"
 import { ZERO_USAGE } from "../../src/types.ts"
 
 export interface FakeBehavior {
   /** Final value (or a function of the request). Default: "done: <prompt>" (or {} with a schema). */
-  value?: Json | ((req: AgentRequest) => Json)
+  value?: Json | ((req: AgentRequest, messages?: AgentMessage[]) => Json)
   /** Outcome status. Default "completed". */
   status?: AgentOutcome["status"]
   /** Error message for failed / schema_failed. */
@@ -50,6 +56,8 @@ export interface FakeBehavior {
   throws?: string
   /** Child session id to report. Default "ses_fake_<index>". */
   sessionID?: string
+  /** Resolved model to report via onUpdate once the "child" exists ("provider/model#variant"). */
+  model?: string
   /** After abort, keep "running" this long before resolving stopped (simulates a slow exit). */
   lingerMs?: number
   /** Ignore the abort signal entirely and finish normally. */
@@ -85,6 +93,9 @@ function matches(m: FakeMatch, req: AgentRequest): boolean {
 export class FakeRunner implements AgentRunner {
   readonly calls: AgentRequest[] = []
   readonly finished: FinishedCall[] = []
+  /** Steering messages received, in arrival order (held ones when the agent started). */
+  readonly steers: { index: number; message: AgentMessage }[] = []
+  private deliveries = 0
   running = 0
   maxRunning = 0
   private rules: [FakeMatch, FakeRule][] = []
@@ -180,6 +191,7 @@ export class FakeRunner implements AgentRunner {
       status = out.status
       return out
     } finally {
+      req.mailbox?.seal()
       this.running--
       this.finished.push({ index: req.index, prompt: req.prompt, status })
       this.notify()
@@ -191,8 +203,26 @@ export class FakeRunner implements AgentRunner {
     const usage: TokenUsage = { ...this.usage, ...b.usage }
     const sessionID = b.sessionID ?? `ses_fake_${req.index}`
     req.onUpdate?.({ sessionID })
+    if (b.model) req.onUpdate?.({ model: b.model })
+
+    const received: AgentMessage[] = []
+    const mb = req.mailbox
+    if (mb) {
+      const held = mb.attach(async (m) => {
+        received.push(m)
+        this.steers.push({ index: req.index, message: m })
+        return { id: `del_${req.index}_${++this.deliveries}` }
+      })
+      for (const m of held) {
+        received.push(m)
+        this.steers.push({ index: req.index, message: m })
+        mb.report(m.id, "delivered")
+      }
+      mb.open()
+    }
 
     const aborted = await this.work(req, b)
+    if (mb) for (const s of await mb.close()) mb.report(s.id, "delivered")
     if (aborted && !b.ignoreAbort) {
       if (b.lingerMs) await sleep(b.lingerMs)
       return { status: "stopped", usage, sessionID }
@@ -204,7 +234,7 @@ export class FakeRunner implements AgentRunner {
     if (status === "failed" || status === "schema_failed") return { status, error: b.error ?? `${status}: ${req.prompt}`, usage, sessionID }
 
     const schema = req.opts.schema
-    const raw = typeof b.value === "function" ? b.value(req) : b.value
+    const raw = typeof b.value === "function" ? b.value(req, received) : b.value
     const value: Json = raw !== undefined ? raw : schema ? {} : `done: ${req.prompt}`
     if (schema && this.validateSchema) {
       const v = validateOutput(schema, value)

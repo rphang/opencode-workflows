@@ -311,6 +311,33 @@ describe("phase / log", () => {
     expect(events.filter((e) => e.type === "phase").map((e) => (e as { title: string }).title)).toEqual(["Do", "Plan", "Extra"])
   })
 
+  test("X10 meta.phases[].model is kept as the phase's display label and never chooses an agent's model", async () => {
+    const meta: WorkflowMeta = { ...META, phases: [{ title: "Scan", model: "openai/gpt-5.4" }, { title: "Judge" }] }
+    const { wf, runner } = run(`phase("Scan"); await agent("s1"); await agent("s2", { model: "anthropic/x" }); phase("Judge"); await agent("j1"); phase("Extra"); await agent("e1")`, {
+      meta,
+    })
+    const s = await wf.result()
+    expect(s.phases.map((p) => [p.title, p.model])).toEqual([
+      ["Scan", "openai/gpt-5.4"],
+      ["Judge", undefined],
+      ["Extra", undefined],
+    ])
+    // Display only: agents keep the model their own opts give (none for s1).
+    expect(runner.calls.map((c) => c.opts.model)).toEqual([undefined, "anthropic/x", undefined, undefined])
+  })
+
+  test("X10 a phase counts its running agents while they run", async () => {
+    const runner = new FakeRunner().on("slow", { hold: true })
+    const meta: WorkflowMeta = { ...META, phases: [{ title: "Scan" }] }
+    const { wf } = run(`phase("Scan"); await parallel([() => agent("slow a"), () => agent("slow b"), () => agent("quick")]); return 1`, { meta, runner })
+    await runner.waitForHeld(2)
+    await sleep(10)
+    expect(wf.summary().phases[0]).toMatchObject({ title: "Scan", agents: 3, done: 1, running: 2 })
+    runner.release()
+    const s = await wf.result()
+    expect(s.phases[0]).toMatchObject({ done: 3, running: 0 })
+  })
+
   test("P33 log() lines land in the summary and as events", async () => {
     const { wf, events } = run(`log("hello", 1, { a: 2 }); log("second")`)
     const s = await wf.result()
@@ -863,3 +890,107 @@ describe("edge cases", () => {
   })
 })
 
+
+// ---- steering (X01–X06) -------------------------------------------------------------------------
+
+describe("steering: WorkflowRun.message", () => {
+  const steerable = () =>
+    new FakeRunner().on("task", { hold: true, value: (_req, msgs) => (msgs?.length ? `steered: ${msgs.map((m) => m.text).join(" | ")}` : "plain") })
+  const user = (text: string) => ({ from: "user" as const, via: "command" as const, text })
+
+  test("X01 a running agent gets the message and its agent() resolves to the steered reply", async () => {
+    const runner = steerable()
+    const { wf, events } = run(`const a = await agent("task A", { label: "alpha" }); return a`, { runner })
+    await runner.waitForHeld(1)
+    const [rep] = await wf.message({ kind: "index", index: 0 }, user("focus on auth"))
+    expect(rep).toMatchObject({ index: 0, label: "alpha", status: "running", outcome: "sent", messageId: "wm_0_1" })
+    runner.release()
+    const s = await wf.result()
+    expect(s.result).toBe("steered: focus on auth")
+    expect(s.steeredAgents).toBe(1)
+    await wf.settled()
+    const rec = await store.readAgentRecord(wf.runId, 0)
+    expect(rec?.messages).toEqual([expect.objectContaining({ id: "wm_0_1", status: "delivered", from: "user", via: "command", text: "focus on auth" })])
+    const j = await journal(wf.runId)
+    expect(j[0]).toMatchObject({ index: 0, status: "completed", steered: true })
+    const msgs = await store.readJournalMessages(wf.runId)
+    expect(msgs).toEqual([expect.objectContaining({ type: "message", index: 0, id: "wm_0_1", text: "focus on auth", urgent: false })])
+    // the agent event carries the messages (progress views)
+    const last = events.filter((e) => e.type === "agent").at(-1) as any
+    expect(last.record.messages?.[0]?.status).toBe("delivered")
+  })
+
+  test("X04 a queued agent's message is held, then delivered with its first prompt", async () => {
+    const runner = steerable()
+    const { wf } = run(`const r = await parallel([() => agent("task A"), () => agent("task B")]); return r`, { runner, maxConcurrent: 1 })
+    await runner.waitForHeld(1)
+    const [rep] = await wf.message({ kind: "index", index: 1 }, user("be brief"))
+    expect(rep).toMatchObject({ status: "queued", outcome: "held" })
+    expect(wf.agents()[1]!.messages?.[0]?.status).toBe("held")
+    runner.release()
+    await runner.waitForHeld(1)
+    runner.release()
+    const s = await wf.result()
+    expect(s.result).toEqual(["plain", "steered: be brief"])
+    expect(wf.agents()[1]!.messages?.[0]?.status).toBe("delivered")
+  })
+
+  test("X02 finished and cached agents refuse with `finished`; a finished run throws", async () => {
+    const runner = steerable().on("quick", { value: "q" })
+    const { wf } = run(`await agent("quick one"); const b = await agent("task B"); return b`, { runner })
+    await runner.waitForHeld(1)
+    const [rep] = await wf.message({ kind: "index", index: 0 }, user("too late"))
+    expect(rep).toMatchObject({ index: 0, status: "completed", outcome: "refused", reason: "finished" })
+    runner.release()
+    await wf.result()
+    await expect(wf.message({ kind: "all" }, user("x"))).rejects.toThrow(/not running/)
+  })
+
+  test("X05 targets: unknown index, ambiguous label, phase (running + queued), all", async () => {
+    const runner = steerable()
+    const { wf } = run(
+      `phase("Research")
+       const r = await parallel([() => agent("task A", { label: "dup" }), () => agent("task B", { label: "dup" }), () => agent("task C", { label: "solo", phase: "Judge" })])
+       return r`,
+      { runner, maxConcurrent: 2 },
+    )
+    await runner.waitForHeld(2)
+    await expect(wf.message({ kind: "index", index: 9 }, user("x"))).rejects.toThrow(/no agent #9/)
+    await expect(wf.message({ kind: "label", label: "dup" }, user("x"))).rejects.toThrow(/#0.*#1/)
+    await expect(wf.message({ kind: "label", label: "nobody" }, user("x"))).rejects.toThrow(/no agent labeled "nobody"/)
+    await expect(wf.message({ kind: "phase", phase: "Nope" }, user("x"))).rejects.toThrow(/Nope/)
+    const research = await wf.message({ kind: "phase", phase: "Research" }, user("r"))
+    expect(research.map((r) => [r.index, r.outcome])).toEqual([
+      [0, "sent"],
+      [1, "sent"],
+    ])
+    const judge = await wf.message({ kind: "label", label: "solo" }, user("j"))
+    expect(judge.map((r) => [r.index, r.outcome])).toEqual([[2, "held"]])
+    const all = await wf.message({ kind: "all" }, user("a"))
+    expect(all.map((r) => r.index)).toEqual([0, 1, 2])
+    runner.release()
+    await runner.waitForHeld(1)
+    runner.release()
+    await wf.result()
+  })
+
+  test("X06 P41 resume: the steered agent and every later agent run live; earlier ones stay cached", async () => {
+    const runner = steerable().on("first", { value: "one" }).on("third", { value: "three" })
+    const body = `const a = await agent("first"); const b = await agent("task B"); const c = await agent("third"); return [a, b, c]`
+    const { wf } = run(body, { runner })
+    await runner.waitForHeld(1)
+    await wf.message({ kind: "index", index: 1 }, user("change course"))
+    runner.release()
+    expect((await wf.result()).result).toEqual(["one", "steered: change course", "three"])
+    await wf.settled()
+
+    const loaded = await loadForResume(store, wf.runId)
+    expect([...loaded.steered]).toEqual([1])
+    const runner2 = new FakeRunner().on("first", { value: "one" }).on("task B", { value: "fresh B" }).on("third", { value: "three" })
+    const { wf: wf2 } = run(body, { runner: runner2, resume: loaded.cursor })
+    const s2 = await wf2.result()
+    expect(s2.result).toEqual(["one", "fresh B", "three"])
+    expect(runner2.prompts).toEqual(["task B", "third"]) // agent 0 cached, 1 and 2 live
+    expect(wf2.agents().map((a) => a.status)).toEqual(["cached", "completed", "completed"])
+  })
+})

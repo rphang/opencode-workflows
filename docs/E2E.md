@@ -13,7 +13,10 @@ Without `OPENCODE_E2E=1` (or without `OPENAI_API_KEY`), the live suites are skip
 offline `harness.test.ts` runs. The opt-in exists because a bare `bun test` at the repo root would
 otherwise pick these files up and spend money.
 
-Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.4-mini`).
+Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.4-mini`). With a free
+`opencode/*` model (for example `opencode/space-bunny-free` or `opencode/nemotron-3-ultra-free`;
+children default to a free model too) no provider key is used, but `OPENAI_API_KEY` must still be
+set to enable the suites (`OPENAI_API_KEY=unused`).
 `OPENCODE_E2E_BIN` sets the CLI binary.
 
 ## How the harness works (`tests/e2e/harness.ts`)
@@ -22,6 +25,10 @@ Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.
   your real opencode data is never touched. Run data (transcript dirs) ends up in
   `.sandbox/e2e-data/opencode/workflows/<sessionID>/<runId>/`. Worktrees end up in
   `.sandbox/e2e-data/opencode/worktree/`.
+  It also sets `OPENCODE_TEST_HOME=.sandbox`: opencode loads every `AGENTS.md` from the project
+  up to the home directory (or to the project root when the project is outside home), so a sandbox
+  inside this repo would otherwise give the live models this repo's contributor `AGENTS.md`. With the
+  home moved to `.sandbox`, the walk stops there. Never put an `AGENTS.md` in `.sandbox/` itself.
 - **Project.** `createProject(name, files)` makes a fresh `git init` repo under
   `.sandbox/e2e-<name>-<ts>`. The plugin is loaded from
   `.opencode/plugins/workflows.js`, which contains one line:
@@ -81,8 +88,83 @@ Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.
 7. **`session.synthetic({resume:true, delivery:"queue"})` does wake an idle parent** (open question
    (a) from the plugin notes). The task notification appears as a `synthetic` message with the
    metadata `{workflowRunId, workflowTaskId, status}`, and the parent model answers it in a new turn.
+8. **Steering lands at step boundaries, never mid-step.** A `delivery:"steer"` synthetic is read before
+   the child's next model step, after the current step and its tool calls finish, so a live test
+   needs a child whose turn has several steps (the `slow_step` tool). `resume:false` can leave a
+   late message in the inbox for ever, and `delivery:"queue"` makes its reply the agent's result;
+   the runner uses `steer` + `resume:false` and wakes the child itself with
+   `interrupt({resume:true})` when a message missed the turn (OPENCODE-API-NOTES, "Inbox and
+   steering"; pinned live by "X03 opencode: …" in `steer.test.ts`).
+
+   **Do not edit files under `src/` while a live suite runs.** opencode watches the plugin's source
+   files and reloads every plugin instance when one changes; a run launched across that reload
+   is refused (P06) or, before 0.2, started in the disposed instance where nothing could control it.
+
+9. **TUI checks drive a real console window.** See "TUI live check" below: PostMessage keys to your own
+   window handle (never SendKeys to whatever window has focus), PrintWindow screenshots, and close
+   only the processes you started.
+
+10. **A permission ask blocks a headless `serve` turn.** With no client attached, nobody answers a
+   permission request. In the per-agent-outputs eval (`docs/design/agent-output-access.md`), a turn
+   woken by a task notification read the run's `journal.jsonl`. That raised an `external_directory`
+   ask (the data dir is outside the project), and the turn sat on it for the whole 150 s test. The
+   plugin now points the model at `workflow_control` `result` instead of the files. A test that
+   expects file reads must answer asks through `GET /api/session/<id>/permission` and
+   `POST …/permission/<requestId>/reply`, or set a rule for the data dir in the project's
+   `opencode.json`.
+11. **Model habits seen with free models, independent of the plugin** (also in the C0 baseline):
+   `opencode/nemotron-3-ultra-free` sometimes relaunches a failed run without being asked (the
+   failed-run `<result>` now says to retry only if the user asks, which reduces it), sometimes sends
+   `args` as a JSON string instead of an object, and sometimes polls `workflow_control status` while a
+   run is going (from the 2nd call the note says repeating does not help). `opencode/space-bunny-free`
+   fills in every field of a tool schema, which is why `result` has only `agent` and `offset`.
+
+## TUI live check (manual, X12–X16)
+
+The live progress tree has no automated live test (a TUI needs a console). The recipe used for
+0.2.0, all under `.sandbox/live-tree/`:
+
+1. **Package.** `npm run build`, copy `dist`, `workflows`, `README.md`, `LICENSE`, `CHANGELOG.md` and a
+   `package.json` with a test version (for example `0.2.0-live.2`) into a staging dir, `npm pack`, and
+   publish it to a local verdaccio (CONTRIBUTING "Smoke-testing the package"). Put a `package.json`
+   with another name at the sandbox root (OPENCODE-API-NOTES "Plugin install resolution").
+2. **Sandbox.** `XDG_*` and `OPENCODE_TEST_HOME` under the sandbox (see "Isolation": without it the
+   repo's `AGENTS.md` reaches the models); `opencode.json`:
+   `{"plugins":["@rphang/opencode-workflows@0.2.0-live.2"],"model":"openai/gpt-5.4-mini"}`;
+   `cli.json`: `{"attention":{"notifications":true}}`. A git project with a `slow_step` tool plugin
+   (`.opencode/plugins/slow-step.js`, 4 s per call) and a script with 3 quick agents, 2 agents that
+   call `slow_step` ten times, and a second phase (`meta.phases` with `model` labels).
+3. **Server.** `opencode serve --port 0` with the sandbox env, `OPENCODE_PASSWORD` and
+   `NPM_CONFIG_REGISTRY`, stdin from `/dev/null`. Poll `GET /api/plugin` for the project until the
+   package is `active` with `features.tui`.
+4. **TUI.** `Start-Process conhost.exe "powershell -File launch.ps1 <url>"` where `launch.ps1` sets the
+   same env and runs `opencode.exe --server <url> <project>`. Take the window handle from the child
+   `powershell.exe`'s `MainWindowHandle` (opencode renames the window).
+5. **Drive it** with `PostMessage(WM_CHAR)` (text, `ctrl+x` = 0x18) and `WM_KEYDOWN` (Enter, arrows)
+   to that handle, and capture with `PrintWindow(hwnd, hdc, 2)`: type the launch prompt, `ctrl+x o`,
+   ↓ to an agent, Enter (child tab opens), `ctrl+x o` there, `x` + Enter (stop), `m` + text + Enter
+   (message). Poll `POST /api/rpc/dynamic-workflows/list` to know when the run finished.
+6. **Clean up** only your PIDs (the TUI's `opencode.exe`, its `powershell`/`conhost`, the server and
+   verdaccio); never the user's opencode processes.
+
+Seen on 2.0.15: footer `wf live-tree-demo 3/5 · 71.6k · $0.05`, live `» slow_step {"n":3}` activity,
+Enter opened the child in a new tab whose footer still tracks the parent run, `x` stopped the agent
+(its transcript ends `interrupted`, the tree shows ✗ "stopped by user"), `m` delivered
+`STEERED-OK`, and the finish toast appeared (conhost: `focus_unknown`).
+
+The README screenshots (`docs/assets/live-tree-*.png`) were retaken for the per-agent model display
+(X18, X19) with a shorter setup: a directory install (`"plugins":["file:///<repo>"]`, which loads the
+repo's `server.ts` and `tui.tsx`; run `npm run build` first) instead of verdaccio, a project in a
+short path outside the repo, and free `opencode/*` models so that the agents show several models:
+parent `opencode/space-bunny-free`, one agent with `effort:'low'` (`…#low`), one with
+`model:'opencode/nemotron-3-ultra-free'`, and a second phase whose `meta.phases` label and agent use
+`opencode/mimo-v2.6-flash-free`. The TUI was launched at 180×48 and 120×40 (`launch.ps1` sets the
+console size). Seen: the rows showed `opencode/space-bunny-free#low` and the other models,
+`agents/<i>.json` recorded the same `model`, the unlabeled phase listed its agents' models, and at
+120 columns the agent models lost their provider first.
 
 ## What is covered (live)
+
 
 | File | Test | PARITY IDs |
 |------|------|------------|
@@ -94,6 +176,8 @@ Optional env: `OPENCODE_E2E_MODEL` sets the parent model (default `openai/gpt-5.
 | `worktree.test.ts` | Two `isolation:'worktree'` agents run in `wf-<runId>-<i>` session locations. The clean one is removed and reports no `worktree`. The one that wrote `wt-proof.txt` is kept: its `agents/1.json.worktree` holds the file, the main checkout does not, and it appears in `git worktree list`. | P28 |
 | `stop.test.ts` | `workflow_control stop_agent` on a streaming agent: its `agent()` returns `null` (`log first=null`) and it is journaled `failed` / "stopped by user". The next agent starts; `workflow_control stop` then gives a notification with status `stopped` and a resume hint, the journal shows that agent as `stopped` (not failed), and both child sessions have outcome `interrupted`. | P51 P44 |
 | `commands.test.ts` | No model calls. `/workflow-authoring` and `/workflows` post synthetic text (API reference; "No workflow runs") without starting an assistant turn. With `OPENCODE_DISABLE_WORKFLOWS=1`, the plugin is active but registers no workflow commands. | P58 P50 P57 P54 |
+| `steer.test.ts` | A second project plugin adds a 3-second `slow_step` tool. The child is told to call it four times; during the first call `/workflows msg <runId> 0 …` (through `POST /api/session/:id/command`) replies `#0 stepper sent`. The result is the steered answer, the child made fewer than 4 calls, its context holds the `<orchestrator-message>` before that answer, `agents/0.json` shows the message `delivered`, the journal has the `message` line and `steered:true`. Relaunching with `resumeFromRunId` runs agent 0 live (new session, original answer). A last case sends the message as the final step starts: it is either answered (that reply is the result) or refused (`finishing`/`finished`), and the child's last reply is always the result. | X01 X03 X06 P41 |
+| `results.test.ts` | Two cases. (1) Two agents, empty result: the notification has `<diagnostics>` with `workflow_control {action:"result", runId:"…"}`, and in a later turn the parent is asked to call `{"action":"result","runId":…,"agent":"beta"}`. The child prompts spell the markers out ("the word BETA, then a hyphen, then the number 5512") so the marker in an output can only come from the return value; the detail view prints the prompt. The test accepts either path and logs which one ran: with `agent`, the detail (`Agent #1 "beta" of run …` and `Return value (text, …)` then `BETA-5512`); without it, the list, whose `#1 "beta" completed … → BETA-5512` preview row must show the value. Observed with `opencode/space-bunny-free`: one run dropped `agent`, filled `agentIndex:0`, `offset:0` and `location:"project"` instead, and got the list (only the list path ran). A later run sent `agent:"beta"` and got the detail view with `BETA-5512`. The detail path is always covered by `tests/parity/results.test.ts`. (2) A partial failure, in natural language ("ultracode… tell me which regions were confirmed… Do not relaunch"): 2 of 4 agents fail at once (unknown `agentType`). The notification has `<agent-failures>2 of 4 agents returned no result`; the parent makes at most 3 `workflow_control` calls before the notification, reads no transcript file, relaunches nothing, and its reply names both failed regions. Passed live with the free parents `opencode/nemotron-3-ultra-free` (twice) and `opencode/space-bunny-free`: 0 `workflow_control` calls before the notification and 0 tool calls after it in every run, with the right reason given ("unknown agent type `no-such-agent`"). | X21 X20 P79 P77 |
 
 ## Results and costs
 
@@ -150,6 +234,13 @@ Full runs on 2026-09-23 (Windows 11, opencode 2.0.15, parent and children on
   the way Claude Code's is. P50 remains DEGRADED.
 - P06 is confirmed live: `delivery:"queue", resume:true` wakes the idle parent, and the model
   answers the `<task-notification>`.
+- **Per-agent outputs** (P79, X20, X21): the parent reads them with `workflow_control` `result`, not
+  from the transcript files, so no `external_directory` ask is raised (gotcha 10). Open items:
+  - the notification's `<result>` is not clipped (a 114 KB result, about 50k tokens, was seen);
+  - a refused `agent()` call leaves no record (X20);
+  - a model can read a finished run's agents before its notification arrives and report twice (P77);
+  - the full re-evaluation listed in `docs/design/agent-output-access.md` ("Before merging") has not
+    been run yet.
 
 ## Demo transcript
 
