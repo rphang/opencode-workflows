@@ -799,8 +799,19 @@ describe("robustness", () => {
     mkdirSync(join(projectDir, ".opencode", "workflows"), { recursive: true })
     const p = await setup({ deps: { watch: true } })
     const before = p.reloads()
-    writeFileSync(join(projectDir, ".opencode", "workflows", "w.js"), script(`return 1`, `{ name: "watched", description: "d" }`))
-    await waitFor(() => p.reloads() > before, "reload after file change", 5000)
+    // macOS FSEvents starts listening asynchronously and can drop a change made in the first moments
+    // after fs.watch() returns. The contract is "a change while the watcher runs triggers a reload",
+    // so keep changing the file (bounded) until one is seen; a broken watcher still fails after 5 s.
+    const file = join(projectDir, ".opencode", "workflows", "w.js")
+    let n = 0
+    const touch = () => writeFileSync(file, script(`return ${n++}`, `{ name: "watched", description: "d" }`))
+    touch()
+    const again = setInterval(touch, 400)
+    try {
+      await waitFor(() => p.reloads() > before, "reload after file change", 5000)
+    } finally {
+      clearInterval(again)
+    }
   })
 
   test("P06 a failing session.synthetic does not break the run", async () => {
