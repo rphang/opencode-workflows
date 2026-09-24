@@ -754,8 +754,15 @@ describe("lifecycle", () => {
     const runner = new FakeRunner().on("wait", { hold: true })
     const { wf } = run(`phase("One"); await agent("quick"); await agent("wait")`, { runner })
     await runner.waitForHeld(1)
-    await sleep(40)
-    const snap = await store.readSummary(wf.runId)
+    // The snapshot is throttled and written asynchronously; a slow CI disk (windows-latest) can take
+    // longer than a fixed delay. Poll until it reflects the running state, bounded like the test above.
+    let snap: Awaited<ReturnType<typeof store.readSummary>>
+    const t0 = Date.now()
+    while (Date.now() - t0 < 3000) {
+      snap = await store.readSummary(wf.runId)
+      if (snap?.status === "running" && snap.agentCount === 2 && snap.phases[0]?.done === 1) break
+      await sleep(10)
+    }
     expect(snap?.status).toBe("running")
     expect(snap?.phases.map(({ title, agents, done, tokens }) => ({ title, agents, done, tokens }))).toEqual([{ title: "One", agents: 2, done: 1, tokens: 110 }])
     expect(snap?.agentCount).toBe(2)
