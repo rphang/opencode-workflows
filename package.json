@@ -1,6 +1,6 @@
 {
   "name": "@rphang/opencode-workflows",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude Code-style dynamic workflows for opencode v2: the model writes a JS orchestration script that fans work out to parallel subagents (agent, parallel, pipeline, budget, resume)",
   "type": "module",
   "main": "./dist/index.js",

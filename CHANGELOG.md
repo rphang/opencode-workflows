@@ -8,6 +8,8 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-24
+
 ### Added
 
 - **Per-agent outputs** (`workflow_control` `result`, an extension; PARITY X21). For a finished run
@@ -189,5 +191,6 @@ Compared with Claude Code (details and status per item in `docs/PARITY.md`):
   `opencode serve`. After a hard crash, suspended child sessions and `wf-<runId>-<i>` worktrees are
   not cleaned up automatically.
 
-[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rphang/opencode-workflows/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rphang/opencode-workflows/releases/tag/v0.1.0

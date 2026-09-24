@@ -29,7 +29,7 @@ body:
     attributes:
       label: Plugin version
       description: "`@rphang/opencode-workflows` version, or the git commit if you run from a checkout."
-      placeholder: "0.1.0"
+      placeholder: "0.2.0"
     validations:
       required: true
   - type: input
