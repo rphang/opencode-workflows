@@ -67,10 +67,10 @@ If you prefer a project-only install, put the same `plugins` entry in `<project>
 ### Pinning a version
 
 ```sh
-opencode plugin add @rphang/opencode-workflows@0.1.0
+opencode plugin add @rphang/opencode-workflows@0.2.0
 ```
 
-or `"plugins": ["@rphang/opencode-workflows@0.1.0"]`. A pinned spec is never flagged as outdated. To
+or `"plugins": ["@rphang/opencode-workflows@0.2.0"]`. A pinned spec is never flagged as outdated. To
 upgrade, change the version.
 
 ### Plugin options
@@ -125,7 +125,7 @@ in `.opencode/workflows/` and `~/.config/opencode/workflows/`.
 - `opencode plugin list` should list `@rphang/opencode-workflows` (plugin id `dynamic-workflows`) as
   active.
 - With `opencode serve`, `GET /api/plugin` shows
-  `{"id":"dynamic-workflows","source":{"type":"package","target":"@rphang/opencode-workflows","version":"0.1.0"},"state":{"status":"active"}}`,
+  `{"id":"dynamic-workflows","source":{"type":"package","target":"@rphang/opencode-workflows","version":"0.2.0"},"state":{"status":"active"}}`,
   and `GET /api/command` lists `workflows`, `workflow-authoring` and `deep-research`.
 
 ## From source
