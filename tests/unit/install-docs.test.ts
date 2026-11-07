@@ -24,16 +24,19 @@ describe("plugin directory install", () => {
   test("opencode's Host.resolve finds a server entry for the repo directory (plugins: [\"file:///<repo>\"])", async () => {
     const entry = Host.resolve({ directory: ROOT } as never).server
     expect(entry).toBeDefined()
-    const mod = (await import(String(entry))) as { default: unknown }
-    const direct = (await import(join(ROOT, "src", "index.ts"))) as { default: unknown }
-    expect(mod.default).toBe(direct.default)
+    const mod = (await import(String(entry))) as { default: { id: string; setup: unknown } }
+    // Since opencode 2.2 the host resolves directories with a package.json name+exports
+    // through them, so the entry is the built bundle (dist/index.js) — a different module
+    // instance than src/index.ts. Assert the plugin shape instead of identity.
+    expect(mod.default.id).toBe("dynamic-workflows")
+    expect(typeof mod.default.setup).toBe("function")
   })
 })
 
 describe("TUI entry (live progress tree, X14)", () => {
-  test("Host.resolve finds the TUI entry of the repo directory (root tui.tsx)", () => {
+  test("Host.resolve finds the TUI entry of the repo directory (dist/tui.js via exports)", () => {
     const entries = Host.resolve({ directory: ROOT } as never)
-    expect(String(entries.tui)).toMatch(/tui\.tsx$/)
+    expect(String(entries.tui).replaceAll("\\", "/")).toMatch(/dist\/tui\.js$/)
   })
 
   test("the server entry never imports the TUI or its host modules (it loads without the TUI peers)", () => {
@@ -77,7 +80,7 @@ describe("README", () => {
     expect(readme).toContain("plugins/workflows.js")
     expect(readme).toContain('export { default } from "')
     expect(readme).toContain("file:///")
-    expect(readme).toContain("2.0.15")
+    expect(readme).toContain("2.2.6")
     expect(readme).toContain("--standalone")
     for (const cmd of ["/deep-research", "/workflows", "/workflow-authoring", "workflow_control", "ultracode"]) {
       expect(readme).toContain(cmd)

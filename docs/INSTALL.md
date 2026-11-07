@@ -3,7 +3,7 @@
 This page covers every install method in detail. For the short version, see the
 [README](../README.md#install).
 
-Requirements: **opencode 2.0.15** (the version the plugin is pinned to). opencode installs npm
+Requirements: **opencode 2.2.6** (the version the plugin is pinned to). opencode installs npm
 plugins itself, so you don't need Node, Bun or npm for the npm install. `git` is needed only for
 `isolation: 'worktree'` agents.
 
