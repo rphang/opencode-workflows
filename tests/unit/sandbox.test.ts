@@ -140,12 +140,17 @@ describe("determinism guards (P15)", () => {
 })
 
 describe("sandbox isolation (P16)", () => {
-  for (const name of ["require", "process", "globalThis", "fetch", "Bun", "setTimeout", "eval", "import", "window", "Deno"]) {
+  for (const name of ["process", "globalThis", "fetch", "Bun", "setTimeout", "eval", "import", "window", "Deno"]) {
     if (name === "import") continue
     test(`${name} is not reachable`, async () => {
       expect(ok(await run(`return typeof ${name}`))).toBe("undefined")
     })
   }
+  test("require is a stub that cannot load packages", async () => {
+    expect(ok(await run("return typeof require"))).toBe("function")
+    const r = err(await run('return require("fs")'))
+    expect(r.error).toContain("isn't available in Code Mode")
+  })
   test("Function constructor escape does not reach host", async () => {
     const r = await run("try { return typeof (() => 1).constructor('return process')() } catch (e) { return 'blocked' }")
     expect(r.ok ? r.value : "blocked").not.toBe("object")

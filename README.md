@@ -7,7 +7,7 @@ script runs in the background, and its result comes back to your session when it
 [![CI](https://github.com/rphang/opencode-workflows/actions/workflows/ci.yml/badge.svg)](https://github.com/rphang/opencode-workflows/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@rphang/opencode-workflows)](https://www.npmjs.com/package/@rphang/opencode-workflows)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![opencode 2.0.15](https://img.shields.io/badge/opencode-2.0.15-black)](#requirements)
+[![opencode 2.2.6](https://img.shields.io/badge/opencode-2.2.6-black)](#requirements)
 
 ```sh
 opencode plugin add @rphang/opencode-workflows
@@ -113,11 +113,11 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 
 ## Requirements
 
-- **opencode 2.0.15.** The plugin is pinned to this exact version (`engines.opencode`, and the
-  `@opencode/*` dependencies are 2.0.15). Other 2.x versions are untested. opencode v1 is not
+- **opencode 2.2.6.** The plugin is pinned to this exact version (`engines.opencode`, and the
+  `@opencode/*` dependencies are 2.2.6). Other 2.x versions are untested. opencode v1 is not
   supported, because the plugin uses the v2 plugin API. Check your version with
-  `opencode --version`, which should print `opencode v2.0.15`. One way to install or pin that
-  version is the npm package: `npm install -g @opencode/cli@2.0.15` (this needs Node.js and npm).
+  `opencode --version`, which should print `opencode v2.2.6`. One way to install or pin that
+  version is the npm package: `npm install -g @opencode/cli@2.2.6` (this needs Node.js and npm).
   See [opencode's docs](https://opencode.ai/docs) for other install methods.
 - **Nothing else for the plugin.** opencode downloads and installs npm plugins itself, so the
   plugin needs no Node, Bun or npm of its own (your opencode install method might).
@@ -654,7 +654,7 @@ whatever model you pick. It has not been tested with Copilot, though. Every agen
 requests, so providers that bill or rate-limit per request will feel a large fan-out.
 
 **Does it work with opencode v1?**
-No. It needs the opencode v2 plugin API and is pinned to 2.0.15.
+No. It needs the opencode v2 plugin API and is pinned to 2.2.6.
 
 **Do I need Claude Code or an Anthropic account?**
 No. This is an independent reimplementation for opencode, and it runs on any provider opencode

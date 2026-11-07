@@ -65,10 +65,10 @@
   },
   "sideEffects": false,
   "devDependencies": {
-    "@opencode/cli": "2.0.15",
-    "@opencode/plugin": "2.0.15",
-    "@opentui/core": "0.5.12",
-    "@opentui/solid": "0.5.12",
+    "@opencode/cli": "2.2.6",
+    "@opencode/plugin": "2.2.6",
+    "@opentui/core": "0.8.3",
+    "@opentui/solid": "0.8.3",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "bun": "^1.4.2",
@@ -76,13 +76,13 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@opencode/codemode": "2.0.15",
+    "@opencode/codemode": "2.2.6",
     "acorn": "8.18.0",
     "ajv": "8.20.0",
-    "effect": "4.0.0-rc.112"
+    "effect": "4.1.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.0.15"
+    "@opencode/plugin": "2.2.6"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
@@ -90,7 +90,7 @@
     }
   },
   "engines": {
-    "opencode": "2.0.15"
+    "opencode": "2.2.6"
   },
   "overrides": {
     "solid-js": "1.9.15"
