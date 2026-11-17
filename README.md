@@ -13,6 +13,10 @@ script runs in the background, and its result comes back to your session when it
 opencode plugin add @rphang/opencode-workflows
 ```
 
+| In the desktop app | In the terminal |
+|---|---|
+| [![A workflow running in the opencode desktop app: the session on the left, and the live tree in the side panel with the run, its phases and each agent's status, model and buttons](docs/assets/desktop-tree-panel.png)](#desktop-app-experimental) | [![A workflow running in the opencode TUI: the live progress tree next to the session, with each agent's status, tokens, model and current tool call](docs/assets/live-tree-running.png)](#live-progress-tree-tui) |
+
 ---
 
 - [What it does](#what-it-does)
