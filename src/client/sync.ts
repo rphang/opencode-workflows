@@ -152,6 +152,11 @@ export class TreeSync {
           const res = (await this.opts.rpc.list(f.sessionID ? { sessionID: f.sessionID } : { all: true }, {
             location: { directory: f.directory },
           })) as ({ ok?: boolean; message?: string } & ListResult) | undefined
+          // Disposed while the call was in flight: the view is gone, leave the tree as it was.
+          if (this.disposed) {
+            this.tree.endSync()
+            break
+          }
           if (res?.ok) {
             this.tree.replace(res)
             this.available = true
@@ -166,6 +171,7 @@ export class TreeSync {
           this.changed()
         } catch (e) {
           this.tree.endSync()
+          if (this.disposed) break
           failure = { error: e }
         }
       } while (this.again && !this.disposed)
@@ -235,6 +241,7 @@ export class TreeSync {
     this.opts.onFinished?.(d)
   }
 
+  /** Stops for good: unsubscribes, clears a pending retry, and drops the answer of a list in flight. */
   dispose(): void {
     this.disposed = true
     this.clearRetry()

@@ -19,12 +19,22 @@ the repo).
   `acorn`, `ajv`, `effect`, all pinned to opencode 2.3.0 (`effect` must stay the exact version
   `@opencode/codemode` depends on, so both share one copy: 4.1.0). The TUI build adds devDependencies
   only (`@opentui/core`, `@opentui/solid` 0.8.4 and `solid-js` 1.9.17, opencode 2.3.0's catalog, with
-  an npm `overrides` for `solid-js` like opencode's own); the TUI provides them at runtime.
+  an npm `overrides` for `solid-js` like opencode's own); the TUI provides them at runtime. The GUI
+  build adds devDependencies only (`vite` 7.3.7 and `vite-plugin-solid` 2.11.10, opencode 2.3.0's
+  catalog, for the `@opencode/plugin/gui/vite` preset); the desktop app provides `solid-js` and the SDK.
 - The engine (`src/engine.ts` and friends) is host-agnostic. Everything opencode-specific lives in
   `src/opencode/`. Engine tests use the fake runner in `tests/helpers/`.
 - The TUI companion (live progress tree) lives in `src/tui/`: `store.ts` is pure and unit-tested; the
-  `.tsx` files only render. The server entry (`src/index.ts`) must never import it. `dist/tui.js` is
-  built by `scripts/build-tui.ts` with the host modules external.
+  `.tsx` files only render. `dist/tui.js` is built by `scripts/build-tui.ts` with the host modules
+  external.
+- The desktop app companion (composer pill, side panel tree, finish notice; experimental GUI API)
+  lives in `src/gui/`: `model.ts` is pure and unit-tested; `window.tsx` wires the host (all state
+  inside `setup`, side work in `createKeyed`, no module state) and `panel.tsx` only renders. Each
+  `.tsx` starts with `/** @jsxImportSource solid-js */` (the root tsconfig's JSX is opentui's).
+  `dist/gui-experimental.cjs` is built by `scripts/build-gui.ts` (Vite preset, app modules external).
+- Both companions share the host-agnostic client logic in `src/client/` (tree store, rows, actions,
+  resync driver: no Solid, opentui, SDK or node builtins). The server entry (`src/index.ts`) never
+  imports `src/tui`, `src/gui` or `src/client`; `tests/unit/install-docs.test.ts` checks it.
 - Every PARITY ID needs a test in `tests/parity/` whose name starts with the ID.
 - Plain TypeScript, ESM. Bun loads `.ts` directly in development; `npm run build` produces the
   published `dist/` bundle.

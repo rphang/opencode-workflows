@@ -27,12 +27,19 @@ may contain breaking changes.
   steers, `ctrl+u` sends an urgent message, `ctrl+d` stops, `ctrl+o` opens the child session.
 - **TUI sidebar section** (X26): a Workflows summary in the session sidebar (foldable when there
   are more than two runs); a child session shows its parent's runs.
+- **Desktop app companion** (experimental, opencode 2.3 GUI plugin API; X28–X30), shipped as
+  `./gui-experimental` → `dist/gui-experimental.cjs`: a composer pill with the session's active
+  runs (warning when paused, danger when an agent failed), the live progress tree as a side panel
+  (open, pause/resume, stop, message, urgent message; this session or the whole project), and one
+  system notification per finished run across windows. The plugin must be listed in
+  `opencode.json(c)`; build-only devDependencies `vite` and `vite-plugin-solid` were added.
 
 ### Fixed
 
 - Failed agents report opencode 2.3's actual error instead of "agent session failed (terminal error)".
 - After an urgent message whose follow-up turn produced no text, the result no longer falls back to
   the cut-off text of the interrupted step.
+- The tree's resync driver no longer updates a disposed view when a pending `list` answers.
 - TUI cold start on opencode 2.3 (X27): the tree retries its first list while plugins load and
   starts over on `plugin.updated`, instead of staying empty until a run starts.
 
@@ -44,7 +51,7 @@ may contain breaking changes.
   never prompts: only allow rules and saved approvals admit it.
 - TUI internals: global commands are registered at setup, `setup` is typed, the 500 ms target
   poll is a reactive effect, and the host-agnostic tree logic lives in `src/client/` (shared with
-  the upcoming GUI part; no `process` reference, so it runs in a browser).
+  the desktop companion; no `process` reference, so it runs in a browser).
 
 - **Requires opencode 2.3.0** (was 2.0.15). `@opencode/*` 2.3.0, `effect` 4.1.0 (the version
   codemode 2.3.0 needs; older pins crash every run), and the TUI is built with OpenTUI 0.8.4 and
