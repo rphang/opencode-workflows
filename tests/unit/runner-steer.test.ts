@@ -196,6 +196,30 @@ describe("runner steer window", () => {
     expect(mb.records()[0]!.status).toBe("delivered")
   })
 
+  test("X08 2.3.0: the interrupted step keeps its partial text (aborted); a successor without text never returns it", async () => {
+    const mb = new AgentMailbox()
+    const { fake, runner } = setup({
+      respond: ({ turn, successor }) =>
+        successor
+          ? {} // the successor's last message has no text part
+          : {
+              steps: 5,
+              stepDelayMs: 15,
+              onStep: (i) => {
+                if (turn === 0 && i === 1) void mb.post(msg("switch to French", { urgent: true }))
+              },
+              text: "PARTIAL english answer",
+            },
+    })
+    const out = await runner.run(req("task", mb).request)
+    const child = fake.children()[0]!
+    const aborted = child.messages.find((m) => m.type === "assistant" && m.error?.type === "aborted")
+    expect(aborted?.error).toEqual({ type: "aborted", message: "Step interrupted" })
+    expect(aborted?.content.some((c: any) => c.type === "text" && c.text === "PARTIAL english answer")).toBe(true)
+    expect(out).toMatchObject({ status: "failed" })
+    if (out.status === "failed") expect(out.error).toMatch(/no text reply/)
+  })
+
   test("X02 a schema agent that already submitted refuses messages with `submitted`", async () => {
     const mb = new AgentMailbox()
     let result: unknown

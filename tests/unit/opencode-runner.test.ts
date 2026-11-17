@@ -457,6 +457,50 @@ describe("createOpencodeRunner", () => {
     if (out.status === "failed") expect(out.error).toMatch(/failed/)
   })
 
+  test("P23 2.3.0: a failed turn with no assistant message reports the failed idle marker's error", async () => {
+    const { runner } = setup({
+      respond: () => ({ outcome: "failed", noAssistant: true, idleError: { type: "provider.auth", message: "invalid api key", status: 401 } }),
+    })
+    const out = await runner.run(req("x").request)
+    expect(out.status).toBe("failed")
+    if (out.status === "failed") expect(out.error).toBe("provider.auth: invalid api key")
+  })
+
+  test("P23 2.3.0: the failed idle marker's error wins over an assistant message's error", async () => {
+    const { runner } = setup({
+      respond: () => ({ outcome: "failed", error: { type: "api", message: "stream broke" }, idleError: { type: "api", message: "rate limited" } }),
+    })
+    const out = await runner.run(req("x").request)
+    if (out.status !== "failed") throw new Error(`expected failed, got ${out.status}`)
+    expect(out.error).toBe("api: rate limited")
+  })
+
+  test("P23 2.3.0: an interrupted step's aborted error is not reported as the failure", async () => {
+    let interrupted = false
+    const { fake, runner } = setup({
+      respond: ({ turn }) =>
+        turn === 0
+          ? {
+              steps: 10,
+              stepDelayMs: 5,
+              text: "partial",
+              onStep: async (i) => {
+                if (i === 1 && !interrupted) {
+                  interrupted = true
+                  await fake.ctx.session.interrupt({ sessionID: fake.children()[0]!.info.id, resume: true })
+                }
+              },
+            }
+          : { outcome: "failed", noAssistant: true },
+    })
+    const out = await runner.run(req("x").request)
+    if (out.status !== "failed") throw new Error(`expected failed, got ${out.status}`)
+    // The interrupted step's message carries {type:"aborted"}; the successor failed with no error text.
+    expect(fake.children()[0]!.messages.some((m) => m.error?.type === "aborted")).toBe(true)
+    expect(out.error).not.toMatch(/aborted|Step interrupted/)
+    expect(out.error).toBe("agent session failed (terminal error)")
+  })
+
   test("P51 child interrupted from outside (not our abort) counts as failed", async () => {
     const { fake, runner } = setup({ respond: () => ({ hang: true }) })
     const p = runner.run(req("x").request)

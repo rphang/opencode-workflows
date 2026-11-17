@@ -158,11 +158,19 @@ function defaultLabel(req: AgentRequest): string {
   return line.length > 60 ? line.slice(0, 57) + "..." : line
 }
 
-/** Text of the last assistant message that has any text part (P20). */
+/**
+ * opencode 2.3.0 (#60674): an interrupted step keeps the text it had streamed and its assistant
+ * message gets `error: {type:"aborted"}`. That text is cut short, so it is never the agent's answer.
+ */
+const isAborted = (m: any) => m?.error?.type === "aborted"
+
+const formatError = (e: any) => (e.type ? `${e.type}: ${e.message}` : String(e.message))
+
+/** Text of the last assistant message that has any text part (P20); interrupted steps are skipped. */
 function lastAssistantText(messages: any[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    if (m?.type !== "assistant" || !Array.isArray(m.content)) continue
+    if (m?.type !== "assistant" || !Array.isArray(m.content) || isAborted(m)) continue
     const parts = m.content.filter((c: any) => c?.type === "text" && typeof c.text === "string").map((c: any) => c.text)
     const text = parts.join("\n").trim()
     if (text) return text
@@ -170,12 +178,18 @@ function lastAssistantText(messages: any[]): string | undefined {
   return undefined
 }
 
+/**
+ * The error of the failed turn (P23): the `{type:"idle", outcome:"failed"}` marker's error (2.3.0,
+ * #53826), else the last assistant error since the last user message. Interrupted steps are skipped.
+ */
 function lastAssistantError(messages: any[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    if (m?.type === "assistant" && m.error?.message) {
-      return m.error.type ? `${m.error.type}: ${m.error.message}` : String(m.error.message)
+    if (m?.type === "idle") {
+      if (m.outcome === "failed" && m.error?.message) return formatError(m.error)
+      continue
     }
+    if (m?.type === "assistant" && m.error?.message && !isAborted(m)) return formatError(m.error)
     if (m?.type === "user") break
   }
   return undefined
@@ -332,7 +346,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         } as any)) as { id?: string } | undefined
         if (m.urgent) {
           try {
-            await ctx.session.interrupt({ sessionID: sessionID!, resume: true } as any)
+            await ctx.session.interrupt({ sessionID: sessionID!, resume: true })
           } catch {
             // already idle: the message wakes it (resume:true)
           }
@@ -359,7 +373,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
        */
       const wake = async () => {
         try {
-          await ctx.session.interrupt({ sessionID: sessionID!, resume: true } as any)
+          await ctx.session.interrupt({ sessionID: sessionID!, resume: true })
         } catch {
           // gone: the verification below reports the messages undelivered
         }

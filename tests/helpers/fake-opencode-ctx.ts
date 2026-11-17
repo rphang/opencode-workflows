@@ -39,6 +39,11 @@ export interface FakeTurn {
   outcome?: "succeeded" | "failed" | "interrupted"
   /** Structured error on the assistant message (API errors). */
   error?: { type: string; message: string }
+  /**
+   * 2.3.0: the error on the failed `{type:"idle", outcome:"failed"}` marker (#53826). Defaults to
+   * `error` on a failed turn; a failed turn with neither has a marker without `error`.
+   */
+  idleError?: { type: string; message: string; status?: number }
   /** When true, no assistant message is recorded at all (live: bad model -> only an idle entry). */
   noAssistant?: boolean
   tokens?: Partial<{ input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }>
@@ -164,6 +169,9 @@ export const DEFAULT_AGENTS: FakeAgent[] = [
 ]
 
 const PARENT_ID = "ses_parent0000000000000000000"
+
+/** 2.3.0: the error on an interrupted step's assistant message. */
+export const ABORTED_ERROR = { type: "aborted", message: "Step interrupted" } as const
 
 export const DEFAULT_MODELS: FakeModel[] = [
   { id: "gpt-5.4-mini", providerID: "openai", variants: ["none", "low", "medium", "high", "xhigh"], released: 3 },
@@ -315,7 +323,9 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     }
     if (spec.afterSubmit && outcome !== "interrupted") await spec.afterSubmit()
     const finalText = spec.textFn ? spec.textFn(s) : spec.text
-    if (finalText !== undefined && outcome !== "interrupted") content.push({ type: "text", text: finalText })
+    // 2.3.0 (#60674): an interrupted step keeps its closed text; its message gets error "aborted".
+    if (finalText !== undefined) content.push({ type: "text", text: finalText })
+    const error = outcome === "interrupted" ? ABORTED_ERROR : spec.error
     if (spec.writeFile) dirty.add(s.info.location.directory)
     if (spec.model) s.info.model = { ...spec.model }
     const t = spec.tokens ?? {}
@@ -335,7 +345,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         model: s.info.model,
         content,
         finish: outcome === "failed" ? "error" : "stop",
-        ...(spec.error ? { error: spec.error } : {}),
+        ...(error ? { error: { ...error } } : {}),
         cost,
         tokens,
       })
@@ -349,7 +359,8 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         s.info.cost += cost
       }
     }
-    s.messages.push({ id: `msg_i${++seq}`, time: { created: 3 }, type: "idle", outcome })
+    const idleError = outcome === "failed" ? (spec.idleError ?? spec.error) : undefined
+    s.messages.push({ id: `msg_i${++seq}`, time: { created: 3 }, type: "idle", outcome, ...(idleError ? { error: { ...idleError } } : {}) })
     s.info.outcome = outcome
     s.info.time.idle = 3
     s.running = false
