@@ -9,5 +9,5 @@
     "outDir": "./dist"
   },
   "include": ["src"],
-  "exclude": ["src/tui"]
+  "exclude": ["src/tui", "src/gui"]
 }

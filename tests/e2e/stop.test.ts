@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): workflow_control stop_agent (single agent -> failed, agent() -> null)
+// Live e2e (real opencode CLI): workflow_control stop_agent (single agent -> failed, agent() -> null)
 // and stop (whole run -> stopped, no agent counted as failed) (P51, P44). Enable with OPENCODE_E2E=1.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {

@@ -1,6 +1,7 @@
 // Interpreter-side runtime for workflow scripts. This source runs INSIDE @opencode/codemode, so it
-// must stay within the codemode JS subset (no classes, `this`, getters, globalThis, Object.freeze).
-// Host functions cannot receive or return functions, which is why parallel/pipeline/budget live
+// must stay within the codemode JS subset (no classes, getters, globalThis; it also avoids `this` and
+// Object.freeze, which codemode supports only since 2.3.0). Host functions cannot receive
+// functions (codemode rejects them as arguments), which is why parallel/pipeline/budget live
 // here rather than on the host. Host globals it relies on (all provided by the engine):
 //   __agent(prompt, opts) -> Promise<value>      __phase(title)     __log(message)
 //   __workflow(nameOrRef, args, hasArgs) -> Promise<value>   __budget_total() -> number|null

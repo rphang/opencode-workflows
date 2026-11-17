@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): an inline script with parallel + pipeline + a schema agent.
+// Live e2e (real opencode CLI): an inline script with parallel + pipeline + a schema agent.
 // P02 tool output shape, P06 task notification to the parent, P40 transcript dir + journal,
 // plus P20/P21/P29/P30/P32/P33 on the real runtime. Enable with OPENCODE_E2E=1 (docs/E2E.md).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"

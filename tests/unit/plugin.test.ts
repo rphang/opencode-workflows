@@ -182,10 +182,10 @@ describe("plugin entry", () => {
     expect(typeof plugin.setup).toBe("function")
   })
 
-  test("registers workflow, workflow_submit and workflow_control tools with codemode:false", async () => {
+  test("registers workflow, workflow_script, workflow_submit and workflow_control tools with codemode:false", async () => {
     const p = await setup()
     const tools = p.tools()
-    expect([...tools.keys()].sort()).toEqual(["workflow", "workflow_control", "workflow_submit"])
+    expect([...tools.keys()].sort()).toEqual(["workflow", "workflow_control", "workflow_script", "workflow_submit"])
     for (const t of tools.values()) expect(t.options?.codemode).toBe(false)
     const wf = tools.get("workflow")!
     expect(wf.description.startsWith(TOOL_DESCRIPTION)).toBe(true)
@@ -212,7 +212,7 @@ describe("plugin entry", () => {
 
   test("P57 OPENCODE_DISABLE_WORKFLOWS=0 keeps the plugin enabled", async () => {
     const p = await setup({ env: { OPENCODE_DISABLE_WORKFLOWS: "0" } })
-    expect(p.tools().size).toBe(3)
+    expect(p.tools().size).toBe(4)
   })
 })
 

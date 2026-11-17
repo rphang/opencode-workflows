@@ -455,7 +455,7 @@ describe("P57 disable switch", () => {
 
   test("P57 enabled by default", async () => {
     const p = await h.setup({ env: { OPENCODE_DISABLE_WORKFLOWS: "0" } })
-    expect([...p.tools().keys()].sort()).toEqual(["workflow", "workflow_control", "workflow_submit"])
+    expect([...p.tools().keys()].sort()).toEqual(["workflow", "workflow_control", "workflow_script", "workflow_submit"])
     expect(p.commands().has("workflows")).toBe(true)
     expect(p.commands().has("workflow-authoring")).toBe(true)
   })

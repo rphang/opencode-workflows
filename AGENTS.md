@@ -16,15 +16,25 @@ the repo).
   `npm test` runs the unit and parity suites. `npx tsc --noEmit` must stay clean.
 - Do not add dependencies without discussing it first. Dependencies: `@opencode/codemode`,
   `@opencode/plugin` (use **`import type` only** from it — the runtime does not need it),
-  `acorn`, `ajv`, `effect`, all pinned to opencode 2.0.15 (`effect` must stay the exact version
-  `@opencode/codemode` depends on, so both share one copy). The TUI build adds devDependencies only
-  (`@opentui/core`, `@opentui/solid` 0.5.10 and `solid-js` 1.9.15, opencode 2.0.15's catalog, with an
-  npm `overrides` for `solid-js` like opencode's own); the TUI provides them at runtime.
+  `acorn`, `ajv`, `effect`, all pinned to opencode 2.3.0 (`effect` must stay the exact version
+  `@opencode/codemode` depends on, so both share one copy: 4.1.0). The TUI build adds devDependencies
+  only (`@opentui/core`, `@opentui/solid` 0.8.4 and `solid-js` 1.9.17, opencode 2.3.0's catalog, with
+  an npm `overrides` for `solid-js` like opencode's own); the TUI provides them at runtime. The GUI
+  build adds devDependencies only (`vite` 7.3.7 and `vite-plugin-solid` 2.11.10, opencode 2.3.0's
+  catalog, for the `@opencode/plugin/gui/vite` preset); the desktop app provides `solid-js` and the SDK.
 - The engine (`src/engine.ts` and friends) is host-agnostic. Everything opencode-specific lives in
   `src/opencode/`. Engine tests use the fake runner in `tests/helpers/`.
 - The TUI companion (live progress tree) lives in `src/tui/`: `store.ts` is pure and unit-tested; the
-  `.tsx` files only render. The server entry (`src/index.ts`) must never import it. `dist/tui.js` is
-  built by `scripts/build-tui.ts` with the host modules external.
+  `.tsx` files only render. `dist/tui.js` is built by `scripts/build-tui.ts` with the host modules
+  external.
+- The desktop app companion (composer pill, side panel tree, finish notice; experimental GUI API)
+  lives in `src/gui/`: `model.ts` is pure and unit-tested; `window.tsx` wires the host (all state
+  inside `setup`, side work in `createKeyed`, no module state) and `panel.tsx` only renders. Each
+  `.tsx` starts with `/** @jsxImportSource solid-js */` (the root tsconfig's JSX is opentui's).
+  `dist/gui-experimental.cjs` is built by `scripts/build-gui.ts` (Vite preset, app modules external).
+- Both companions share the host-agnostic client logic in `src/client/` (tree store, rows, actions,
+  resync driver: no Solid, opentui, SDK or node builtins). The server entry (`src/index.ts`) never
+  imports `src/tui`, `src/gui` or `src/client`; `tests/unit/install-docs.test.ts` checks it.
 - Every PARITY ID needs a test in `tests/parity/` whose name starts with the ID.
 - Plain TypeScript, ESM. Bun loads `.ts` directly in development; `npm run build` produces the
   published `dist/` bundle.
@@ -33,11 +43,14 @@ the repo).
 
 ## Script sandbox
 
-Scripts run in `@opencode/codemode` (restricted JS interpreter: async functions, closures,
-destructuring, Promise, Map/Set/JSON/Math/Date/RegExp; NO classes, `this`, getters, `globalThis`,
-`Object.freeze`, imports). Host functions are exposed as globals via `Extension.make`; they can
-receive and return plain data only — never functions — so `parallel`/`pipeline`/`budget` are
-written in a JS prelude inside the interpreter. Verified: host-global async calls run
+Scripts run in `@opencode/codemode` (restricted JS interpreter, a bytecode VM since 2.3.0: async
+functions, closures, destructuring, generators, Promise, Map/Set/WeakMap/JSON/Math/Date/RegExp;
+since 2.3.0 also `this` in non-arrow functions, `bind`/`call`/`apply`, `Object.freeze`; NO classes,
+getters, user constructors, `globalThis`). Since 2.3.0 codemode has a global `require(name)` and
+`import(name)` that return native globals (`require("Math")`), so `src/sandbox.ts` hides `require`,
+guards `crypto`, and rejects `import()` to keep the P15 guards intact. Host functions are exposed as
+globals via `Extension.make`; they cannot receive functions (codemode rejects them as arguments), so
+`parallel`/`pipeline`/`budget` are written in a JS prelude inside the interpreter. Verified: host-global async calls run
 concurrently, host errors surface as catchable exceptions, `const Date = ...` shadowing works and
 `new Date()` on a user function throws.
 
@@ -75,7 +88,7 @@ messages; assistant messages are `{type:"assistant", content:[{type:"text", text
 - `docs/PARITY.md` — behavior spec, one ID per behavior, each with a parity test (`P` = Claude Code
   parity, `X` = extensions marked `EXT`).
 - `docs/E2E.md` — live test harness, known gotchas, the demo script.
-- `docs/OPENCODE-API-NOTES.md` — observed opencode 2.0.15 plugin API behavior.
+- `docs/OPENCODE-API-NOTES.md` — observed opencode plugin API behavior (2.0.15 live, 2.3.0 deltas).
 - `docs/design/` — approved designs for features beyond Claude Code (steering, live progress tree)
   and design decisions such as how the parent model sees per-agent outputs (`agent-output-access.md`).
 - `docs/notes/` — maintainer notes and drafts (not published anywhere).

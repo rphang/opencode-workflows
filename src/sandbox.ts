@@ -15,7 +15,10 @@
 // is the global is rewritten to `__wf_newDate(...)`, and `x instanceof Date` to
 // `__wf_isDate(x)`. The rewrite only changes columns, never lines. `Date` itself is shadowed
 // by a plain function: `Date()` and `Date.now()` throw; `Date.UTC`/`Date.parse` delegate. `Math` is
-// a copy of the native members with `random` throwing. The captured natives are hidden from the body.
+// a copy of the native members with `random` throwing, and `crypto` a stand-in whose
+// `randomUUID`/`getRandomValues` throw. The captured natives are hidden from the body, and so is
+// codemode's `require` (since 2.3.0 it loads a global by name, e.g. `require("Math")` would return
+// the native Math); `import()` does the same, so the body syntax check rejects it outright.
 // Known gaps: `new Date` via an alias (`const D = Date; new D(0)`) throws codemode's
 // "cannot be constructed" error instead of working; `Date.prototype` is not exposed; the guards are
 // hygiene, not a security boundary — deliberate evasion such as `new Date(0).constructor.now()`
@@ -58,6 +61,8 @@ const RANDOM_MSG = "Math.random() is not available in workflow scripts (breaks r
 const NOW_MSG = "Date.now() is not available in workflow scripts (breaks resume); pass a timestamp in through args instead"
 const NEW_DATE_MSG = "new Date() without arguments is not available in workflow scripts (breaks resume); pass a timestamp in through args instead"
 const DATE_CALL_MSG = "Date() is not available in workflow scripts (breaks resume); pass a timestamp in through args instead"
+const CRYPTO_MSG = "crypto.randomUUID() / crypto.getRandomValues() are not available in workflow scripts (breaks resume); derive ids from the index or args instead"
+const IMPORT_MSG = "import() is not available in workflow scripts; agent, parallel, pipeline, phase, log, workflow and budget are already globals"
 
 const GUARDS = [
   "const __wf_Math = Math; const __wf_Date = Date;",
@@ -65,14 +70,15 @@ const GUARDS = [
   `const __wf_gDate = (() => { const D = (...a) => { throw new Error(${JSON.stringify(DATE_CALL_MSG)}) }; D.now = () => { throw new Error(${JSON.stringify(NOW_MSG)}) }; D.UTC = (...a) => __wf_Date.UTC(...a); D.parse = (s) => __wf_Date.parse(s); return D; })();`,
   `const __wf_newDate = (...a) => { if (a.length === 0) throw new Error(${JSON.stringify(NEW_DATE_MSG)}); return new __wf_Date(...a); };`,
   "const __wf_isDate = (x) => x instanceof __wf_Date;",
+  `const __wf_gCrypto = ({ randomUUID: () => { throw new Error(${JSON.stringify(CRYPTO_MSG)}) }, getRandomValues: (a) => { throw new Error(${JSON.stringify(CRYPTO_MSG)}) } });`,
 ].join("\n")
 
-// Three nested scopes (all on one line): the first installs the guarded Math/Date, the second hides
-// the captured natives (separate scope to avoid TDZ on the names the first one reads), the third
+// Three nested scopes (all on one line): the first installs the guarded Math/Date/crypto, the second
+// hides the captured natives and `require` (separate scope to avoid TDZ on the names the first one reads), the third
 // holds the body, so a body may declare its own `Date`/`Math` without a redeclaration error.
 const OPEN =
-  "return await (async () => { const Math = __wf_gMath; const Date = __wf_gDate; " +
-  "return await (async () => { const __wf_Math = undefined; const __wf_Date = undefined; const __wf_gMath = undefined; const __wf_gDate = undefined; " +
+  "return await (async () => { const Math = __wf_gMath; const Date = __wf_gDate; const crypto = __wf_gCrypto; " +
+  "return await (async () => { const __wf_Math = undefined; const __wf_Date = undefined; const __wf_gMath = undefined; const __wf_gDate = undefined; const __wf_gCrypto = undefined; const require = undefined; " +
   "return await (async () => {"
 const CLOSE = "\n})(); })(); })();"
 
@@ -114,11 +120,25 @@ function parseBody(body: string): AnyNode {
   }) as AnyNode
 }
 
-/** Parses a body standalone with the exact options codemode uses. Line numbers are body-relative. */
+/** `import()` loads a native global by name in codemode 2.3+, bypassing the guards (P15/P16). */
+function forbiddenSyntax(ast: AnyNode): SyntaxCheck {
+  let found: AnyNode | undefined
+  walk(ast, (n) => {
+    if (!found && n.type === "ImportExpression") found = n
+  })
+  if (!found) return { ok: true }
+  const { line, column } = found.loc!.start
+  return { ok: false, error: `SyntaxError: ${IMPORT_MSG} (line ${line}, col ${column + 1})`, line, column: column + 1 }
+}
+
+/**
+ * Parses a body standalone (script goal, top-level await/return, as wrapped by buildProgram; codemode
+ * itself is laxer about module syntax) and rejects constructs that would escape the guards.
+ * Line numbers are body-relative.
+ */
 export function checkBodySyntax(body: string): SyntaxCheck {
   try {
-    parseBody(body)
-    return { ok: true }
+    return forbiddenSyntax(parseBody(body))
   } catch (e: any) {
     const loc = e?.loc as { line: number; column: number } | undefined
     const msg = String(e?.message ?? e).replace(/\s*\(\d+:\d+\)$/, "")
@@ -207,6 +227,8 @@ export function buildProgram(body: string, args: unknown): string {
     const check = checkBodySyntax(body)
     return PARSE_ERROR_SENTINEL + JSON.stringify(check.ok ? { error: "SyntaxError" } : check)
   }
+  const forbidden = forbiddenSyntax(ast)
+  if (!forbidden.ok) return PARSE_ERROR_SENTINEL + JSON.stringify(forbidden)
   const rewritten = rewriteDates(body, ast)
   return `${HEADER_BEFORE_ARGS}const args = ${argsLiteral(args)};\n${GUARDS}\n${OPEN}\n${rewritten}${CLOSE}`
 }

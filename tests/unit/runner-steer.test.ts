@@ -79,6 +79,7 @@ describe("runner steer window", () => {
   test("X03 a message sent after the last step: the runner itself starts the successor turn (interrupt resume:true) and reads that reply", async () => {
     const mb = new AgentMailbox()
     const { fake, runner } = setup({
+      idleHookFires: false, // 2.0.15, or a message after the idle check: the fallback path
       successorDelayMs: 20,
       respond: ({ successor }) =>
         successor
@@ -104,6 +105,7 @@ describe("runner steer window", () => {
   test("X03 a message that never reaches the agent is reported undelivered, with a warning; the result stays the turn's reply", async () => {
     const mb = new AgentMailbox()
     const { runner } = setup({
+      idleHookFires: false,
       noSuccessor: true,
       respond: () => ({ steps: 1, afterSteps: () => void mb.post(msg("lost")), text: "first answer" }),
     })
@@ -119,6 +121,7 @@ describe("runner steer window", () => {
     const { fake, runner } = setup({
       // opencode would start a resume:true item's successor turn on its own; here it would come after
       // the ~2 s verify window, when nobody reads the session any more.
+      idleHookFires: false,
       successorDelayMs: 2_600,
       ignoreWake: true,
       respond: ({ successor }) =>
@@ -194,6 +197,30 @@ describe("runner steer window", () => {
     expect(fake.calls.interrupt).toEqual([{ sessionID: fake.children()[0]!.info.id, resume: true }])
     expect(r.updates.some((u) => u.warnings?.some((w) => /urgent/i.test(w) && /tokens/.test(w)))).toBe(true)
     expect(mb.records()[0]!.status).toBe("delivered")
+  })
+
+  test("X08 2.3.0: the interrupted step keeps its partial text (aborted); a successor without text never returns it", async () => {
+    const mb = new AgentMailbox()
+    const { fake, runner } = setup({
+      respond: ({ turn, successor }) =>
+        successor
+          ? {} // the successor's last message has no text part
+          : {
+              steps: 5,
+              stepDelayMs: 15,
+              onStep: (i) => {
+                if (turn === 0 && i === 1) void mb.post(msg("switch to French", { urgent: true }))
+              },
+              text: "PARTIAL english answer",
+            },
+    })
+    const out = await runner.run(req("task", mb).request)
+    const child = fake.children()[0]!
+    const aborted = child.messages.find((m) => m.type === "assistant" && m.error?.type === "aborted")
+    expect(aborted?.error).toEqual({ type: "aborted", message: "Step interrupted" })
+    expect(aborted?.content.some((c: any) => c.type === "text" && c.text === "PARTIAL english answer")).toBe(true)
+    expect(out).toMatchObject({ status: "failed" })
+    if (out.status === "failed") expect(out.error).toMatch(/no text reply/)
   })
 
   test("X02 a schema agent that already submitted refuses messages with `submitted`", async () => {

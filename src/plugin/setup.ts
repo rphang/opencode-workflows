@@ -6,6 +6,10 @@ import { join } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { listWorkflows, personalWorkflowsDir, projectWorkflowDirs, type RegistryOptions } from "../registry.ts"
 import { createOpencodeRunner } from "../opencode/runner.ts"
+import { createFreeformToolFilter } from "../opencode/freeform.ts"
+import { createPermissionAsserter, createUnattendedAskGuard } from "../opencode/permission-assert.ts"
+import { createJobTracker, type JobTracker } from "../opencode/background.ts"
+import { ChildLiveRegistry, idleHookEnabled, registerIdleHook } from "../opencode/idle.ts"
 import { createChildAskGuard, effectiveSessionRules } from "../opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, type SubmitRegistry } from "../opencode/submit.ts"
 import { RunStore } from "../store.ts"
@@ -14,22 +18,47 @@ import { addCommands } from "./commands.ts"
 import { largeWorkflowThreshold, resolveSizeGuideline, sizeGuidelineAdvice } from "./guideline.ts"
 import { WorkflowHost } from "./host.ts"
 import { LiveRuntime } from "./rpc.ts"
-import { CONTROL_TOOL_NAME, createControlTool, createWorkflowTool, WORKFLOW_TOOL_NAME, workflowToolDescription } from "./tools.ts"
+import {
+  CONTROL_TOOL_NAME,
+  createControlTool,
+  createScriptTool,
+  createWorkflowTool,
+  SCRIPT_TOOL_NAME,
+  WORKFLOW_TOOL_NAME,
+  workflowToolDescription,
+} from "./tools.ts"
 
 export const PLUGIN_ID = "dynamic-workflows"
 export const DISABLE_ENV = "OPENCODE_DISABLE_WORKFLOWS"
 /** `0`/`false`/`no`/`off` makes the live tree's RPC read-only (X17). */
 export const RPC_CONTROL_ENV = "OPENCODE_WORKFLOW_RPC_CONTROL"
+/** `0`/`false`/`no`/`off` registers no freeform `workflow_script` tool (X24). */
+export const FREEFORM_ENV = "OPENCODE_WORKFLOW_FREEFORM"
+
+/** What the plugin hands each run's runner: the submit registry and live children are per instance. */
+export interface RunnerInput {
+  ctx: Plugin.Context
+  parentSessionID: string
+  parentAgent?: string
+  runId: string
+  registry: SubmitRegistry
+  /** Read by this instance's experimental.idle hook (X22, X23). */
+  live: ChildLiveRegistry
+  /** Background jobs the idle hook reports and the runner waits for (X31). */
+  jobs: JobTracker
+}
 
 /** Injection seams (tests) and host overrides. Everything is optional. */
 export interface PluginDeps {
+  /** P76: how long a scriptPath check inside a running script may wait (default UNATTENDED_ASSERT_TIMEOUT_MS). */
+  unattendedAssertTimeoutMs?: number
   env?: Record<string, string | undefined>
   /** Run data root (default: plugin option `dataDir`, then defaultDataRoot()). */
   dataDir?: string
   store?: RunStore
   registryOptions?: RegistryOptions
   /** Replaces the opencode child-session runner (tests use FakeRunner). */
-  createRunner?: (input: { ctx: Plugin.Context; parentSessionID: string; parentAgent?: string; runId: string; registry: SubmitRegistry }) => AgentRunner
+  createRunner?: (input: RunnerInput) => AgentRunner
   /** Watch the saved-workflow directories and reload commands on change. Default true. */
   watch?: boolean
   now?: () => number
@@ -51,6 +80,14 @@ export function rpcControlEnabled(env: Record<string, string | undefined>, optio
   return !(opt === false || (typeof opt === "string" && FALSY.test(opt.trim())))
 }
 
+/** X24: `workflow_script` is registered unless env OPENCODE_WORKFLOW_FREEFORM is falsy or option `freeformTool` is false. */
+export function freeformToolEnabled(env: Record<string, string | undefined>, options: Record<string, unknown> | undefined): boolean {
+  const raw = env[FREEFORM_ENV]
+  if (raw !== undefined && FALSY.test(raw.trim())) return false
+  const opt = options?.freeformTool
+  return !(opt === false || (typeof opt === "string" && FALSY.test(opt.trim())))
+}
+
 /** P57: env OPENCODE_DISABLE_WORKFLOWS=1 (true/yes/on) or plugin option `disabled: true`. */
 export function isDisabled(env: Record<string, string | undefined>, options: Record<string, unknown> | undefined): boolean {
   const raw = env[DISABLE_ENV]
@@ -69,19 +106,24 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
   const dataDir = deps.dataDir ?? (typeof options.dataDir === "string" && options.dataDir ? options.dataDir : undefined)
   const store = deps.store ?? new RunStore(dataDir ? { root: dataDir } : {})
   const submitRegistry = createSubmitRegistry(ctx.storage)
+  const liveChildren = new ChildLiveRegistry()
+  const jobTracker = createJobTracker(ctx.storage)
 
   const createRunner =
     deps.createRunner ??
-    ((input: { ctx: Plugin.Context; parentSessionID: string; parentAgent?: string; runId: string; registry: SubmitRegistry }) =>
+    ((input: RunnerInput) =>
       createOpencodeRunner(input.ctx, {
         parentSessionID: input.parentSessionID,
         parentAgent: input.parentAgent,
         runId: input.runId,
         registry: input.registry,
+        live: input.live,
+        jobs: input.jobs,
         // P60: workflow agents can neither launch nor manage workflows.
         deniedTools: [WORKFLOW_TOOL_NAME, CONTROL_TOOL_NAME],
       }))
 
+  const freeform = freeformToolEnabled(env, options)
   const sizeGuideline = resolveSizeGuideline(env, options)
   const sizeAdvice = sizeGuidelineAdvice(sizeGuideline)
 
@@ -101,12 +143,15 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     control: rpcControlEnabled(env, options),
   })
 
+  // P76 (opencode 2.3.0): scriptPath approvals through opencode's own permission check and prompt.
+  const assertPermission = createPermissionAsserter(ctx, { unattendedTimeoutMs: deps.unattendedAssertTimeoutMs })
+
   const host = new WorkflowHost({
     cwd,
     store,
     registryOptions,
     createRunner: ({ parentSessionID, parentAgent, runId }) =>
-      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry }),
+      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry, live: liveChildren, jobs: jobTracker }),
     notify: (input) => ctx.session.synthetic(input as any),
     onSaved: reloadCommands,
     now: deps.now,
@@ -122,6 +167,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     // P76: scriptPath reads honour the caller's read/external_directory rules, like opencode's read tool.
     projectRoots: projectRoot(ctx),
     permissionRules: (sessionID, agent) => effectiveSessionRules(ctx, sessionID, agent),
+    assertPermission,
     onEvent: live.onEvent,
     activity: live.activityFor,
   })
@@ -146,6 +192,9 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     if (typeof permissionHook === "function") {
       registrations.push(await permissionHook("evaluate", createChildAskGuard(ctx)))
     }
+    // X22/X23: opencode 2.3+ runs `experimental.idle` before a session goes idle (2.0.15 never does).
+    const idleHook = idleHookEnabled(env) ? await registerIdleHook(ctx, { registry: submitRegistry, live: liveChildren, jobs: jobTracker }) : undefined
+    if (idleHook) registrations.push(idleHook)
     registrations.push(
       await ctx.tool.transform((editor) => {
         let saved: ReturnType<typeof listWorkflows> = []
@@ -153,10 +202,17 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
           saved = listWorkflows(cwd, registryOptions)
         } catch {}
         editor.add(createWorkflowTool(host, workflowToolDescription({ saved, sizeAdvice })))
+        if (freeform) editor.add(createScriptTool(host))
         editor.add(createControlTool(host))
         editor.add(createSubmitTool(submitRegistry))
       }),
     )
+    // P76: scriptPath checks made outside a tool call (workflow() in a running script) never prompt.
+    if (assertPermission) registrations.push(await ctx.permission.hook("evaluate", createUnattendedAskGuard()))
+    // X24: models that cannot send freeform text would only see a JSON duplicate of `workflow {script}`.
+    if (freeform && typeof (ctx.session as any).hook === "function") {
+      registrations.push(await ctx.session.hook("context", createFreeformToolFilter(ctx, SCRIPT_TOOL_NAME)))
+    }
     registrations.push(
       await ctx.command.transform((editor) => {
         addCommands(editor, {

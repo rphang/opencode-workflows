@@ -1,0 +1,31 @@
+// English copy of the desktop app companion (src/gui/). `ctx.t` reads it; `{{name}}` placeholders.
+// The confirm and prompt texts of row actions come from the shared client logic (src/client/tree.ts).
+
+export default {
+  "pill.title": "Workflow {{name}}",
+  "pill.titlePaused": "Workflow {{name}} ‖ paused",
+  "panel.title": "Workflows",
+  "panel.mobile": "Workflows",
+  "panel.loading": "Loading workflows…",
+  "panel.unavailable": "Workflows are not available for this session",
+  "panel.empty.session": "No workflow runs in this session yet",
+  "panel.empty.all": "No workflow runs in this project yet",
+  "panel.scope": "All runs of this project",
+  "panel.scope.description": "Off: only this session's runs",
+  "command.tree": "Workflows: toggle the live progress tree",
+  "command.group": "Workflows",
+  "command.noSession": "Open a session first: the workflows panel lives next to a session",
+  "button.collapse": "Collapse",
+  "button.expand": "Expand",
+  "button.open": "Open session",
+  "button.pause": "Pause run",
+  "button.resume": "Resume run",
+  "button.stop": "Stop",
+  "button.message": "Message",
+  "button.urgent": "Urgent message (interrupts the current step)",
+  "confirm.stop": "Stop",
+  "prompt.placeholder": "instruction for the agent",
+  "prompt.submit": "Send",
+  "control.title": "Workflows",
+  "control.done": "done",
+} as const

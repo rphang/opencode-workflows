@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15), no model calls: command registration, /workflow-authoring (P58),
+// Live e2e (real opencode CLI), no model calls: command registration, /workflow-authoring (P58),
 // /workflows on an empty session (P50) and the disable switch (P57). Enable with OPENCODE_E2E=1.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {

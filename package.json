@@ -20,6 +20,7 @@
       "import": "./dist/tui.js",
       "default": "./dist/tui.js"
     },
+    "./gui-experimental": "./dist/gui-experimental.cjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -65,24 +66,26 @@
   },
   "sideEffects": false,
   "devDependencies": {
-    "@opencode/cli": "2.0.15",
-    "@opencode/plugin": "2.0.15",
-    "@opentui/core": "0.5.12",
-    "@opentui/solid": "0.5.12",
+    "@opencode/cli": "2.3.0",
+    "@opencode/plugin": "2.3.0",
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "bun": "^1.4.2",
-    "solid-js": "1.9.15",
-    "typescript": "^7.0.2"
+    "solid-js": "1.9.17",
+    "typescript": "^7.0.2",
+    "vite": "7.3.7",
+    "vite-plugin-solid": "2.11.10"
   },
   "dependencies": {
-    "@opencode/codemode": "2.0.15",
+    "@opencode/codemode": "2.3.0",
     "acorn": "8.18.0",
     "ajv": "8.20.0",
-    "effect": "4.0.0-rc.112"
+    "effect": "4.1.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.0.15"
+    "@opencode/plugin": "2.3.0"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
@@ -90,9 +93,9 @@
     }
   },
   "engines": {
-    "opencode": "2.0.15"
+    "opencode": "2.3.0"
   },
   "overrides": {
-    "solid-js": "1.9.15"
+    "solid-js": "1.9.17"
   }
 }

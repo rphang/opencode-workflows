@@ -1,11 +1,15 @@
-// Parity: tool surface (P01–P06), through the plugin's `workflow` tool over a fake opencode ctx.
+// Parity: tool surface (P01–P06), through the plugin's `workflow` tool over a fake opencode ctx, and
+// the freeform `workflow_script` tool (X24).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { AUTHORING_REFERENCE, TOOL_DESCRIPTION } from "../../src/authoring.ts"
 import { isRunActive } from "../../src/engine.ts"
+import { WORKFLOW_INPUT_SCHEMA } from "../../src/plugin/tools.ts"
 import { FakeRunner, sleep } from "../helpers/fake-runner.ts"
-import { createHarness, script, SESSION, tag, tctx, type Harness } from "../helpers/plugin-harness.ts"
+import { createHarness, script, SESSION, tag, tctx, visibleTools, type Harness } from "../helpers/plugin-harness.ts"
 
 let h: Harness
 beforeEach(async () => {
@@ -59,6 +63,23 @@ describe("P01 tool input", () => {
     expect(out.error).toBeUndefined()
     expect(out.workflowName).toBe("greet")
     expect(p.resultOf(await p.notification(0))).toBe("hi ann")
+  })
+
+  test("P01 the `workflow` tool's schema, options and base description stay byte-identical (Claude Code parity, prompt caching)", async () => {
+    // A change here is a deliberate parity / prompt-cache decision: update the hashes in the same commit.
+    // The freeform workflow_script tool (X24) is a separate tool and must not touch this one.
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex")
+    expect(sha(JSON.stringify(WORKFLOW_INPUT_SCHEMA))).toBe("67ede3b7265cc247f9ba6d80828bcd6dd61190deff4e04839cd9d3a795104ac9")
+    expect(sha(TOOL_DESCRIPTION)).toBe("6abf884cd52b7e936700c175dc03cc7adc6ec84c3e9d592bc97889e7ffbae954")
+    for (const options of [{}, { freeformTool: false }]) {
+      const p = await h.setup({ options })
+      const tool = p.tools().get("workflow")!
+      expect(tool.input).toEqual(WORKFLOW_INPUT_SCHEMA)
+      expect(tool.options).toEqual({ codemode: false })
+      expect(tool.freeform).toBeUndefined()
+      expect(tool.description.startsWith(TOOL_DESCRIPTION)).toBe(true)
+      expect(tool.description).not.toContain("workflow_script")
+    }
   })
 
   test("P01 title and description inputs are ignored (meta decides the name and description)", async () => {
@@ -276,5 +297,153 @@ describe("P06 completion notification", () => {
     await p.settled(out.runId!)
     await sleep(30)
     expect(p.notifications().length).toBe(1)
+  })
+})
+
+describe("X24 workflow_script: freeform inline script", () => {
+  // Mirrors upstream packages/ai/src/schema/messages.ts ToolDefinition.freeformField: the input schema's
+  // only property, when it is a required string; otherwise opencode refuses the freeform tool.
+  const freeformField = (schema: any): string | undefined => {
+    const props = Object.entries(schema?.properties && typeof schema.properties === "object" ? schema.properties : {})
+    if (props.length !== 1) return undefined
+    const [name, prop] = props[0] as [string, any]
+    if (!prop || prop.type !== "string") return undefined
+    return Array.isArray(schema.required) && schema.required.includes(name) ? name : undefined
+  }
+  const HINT = "workflow_script takes only the script; use the workflow tool for args, name, scriptPath, resumeFromRunId or budget"
+  const FENCE = "`".repeat(3)
+
+  test("X24 declares freeform text over an input of exactly one required string property, `script`", async () => {
+    const p = await h.setup()
+    const tool = p.tools().get("workflow_script")!
+    expect(tool).toBeTruthy()
+    expect(tool.freeform).toEqual({ type: "text" })
+    expect(freeformField(tool.input)).toBe("script")
+    expect(tool.input).toEqual({ type: "object", properties: { script: { type: "string" } }, required: ["script"] })
+    expect(tool.options).toEqual({ codemode: false, permission: "workflow" })
+    expect(tool.description).toMatch(/^Launch a NEW dynamic workflow from inline script text\./)
+    expect(tool.description).toContain("`workflow` tool")
+    expect(tool.description).toContain("export const meta")
+    expect(tool.description.split(/\s+/).length).toBeLessThan(110)
+  })
+
+  test("X24 {script} launches exactly like workflow {script}: output shape, persisted scriptPath, result", async () => {
+    const p = await h.setup()
+    const src = script(`return "from-freeform"`)
+    const out = await p.callScript({ script: src })
+    const ref = await p.call({ script: src })
+    expect(Object.keys(out).sort()).toEqual(Object.keys(ref).sort())
+    expect(out.status).toBe("async_launched")
+    expect(out.error).toBeUndefined()
+    expect(out.workflowName).toBe("t-wf")
+    expect(readFileSync(out.scriptPath!, "utf8")).toBe(src)
+    expect(out.scriptPath!.startsWith(out.transcriptDir!)).toBe(true)
+    const results = [p.resultOf(await p.notification(0)), p.resultOf(await p.notification(1))]
+    expect(results).toEqual(["from-freeform", "from-freeform"])
+    // The persisted copy is re-runnable through the workflow tool (P04).
+    const again = await p.call({ scriptPath: out.scriptPath })
+    expect(again.error).toBeUndefined()
+  })
+
+  test("X24 an extra key (a JSON call that also sends args, name, ...) is refused with the workflow-tool hint; nothing runs", async () => {
+    const p = await h.setup()
+    for (const extra of [{ args: [1] }, { name: "deep-research" }, { scriptPath: "x.js" }, { resumeFromRunId: "wf_x" }, { budget: 10 }, { title: "t" }]) {
+      const out = await p.callScript({ script: script(`return await agent("a")`), ...extra })
+      expect(out.status).toBe("async_launched")
+      expect(out.taskType).toBe("local_workflow")
+      expect(out.error).toBe(HINT)
+      expect(out.transcriptDir).toBeUndefined()
+    }
+    await sleep(30)
+    expect(p.runner.calls.length).toBe(0)
+    expect(p.notifications().length).toBe(0)
+    expect(await h.store.listRuns()).toEqual([])
+  })
+
+  test("X24 a script failing its meta check returns the P03 error and never runs", async () => {
+    const p = await h.setup()
+    const out = await p.callScript({ script: `await agent("a")\nreturn 1` })
+    expect(out.status).toBe("async_launched")
+    expect(out.error).toMatch(/export const meta/)
+    const missing = await p.callScript({})
+    expect(missing.error).toMatch(/script/)
+    await sleep(30)
+    expect(p.runner.calls.length).toBe(0)
+  })
+
+  test("X24 a single code fence wrapping the whole input is stripped; the stripped script runs and is persisted", async () => {
+    const p = await h.setup()
+    const src = script(`return "fenced"`)
+    for (const wrapped of [`${FENCE}js\n${src}\n${FENCE}`, `${FENCE}\n${src}\n${FENCE}\n`, `  ${FENCE}javascript\n${src}\n${FENCE}  `]) {
+      const out = await p.callScript({ script: wrapped })
+      expect(out.error).toBeUndefined()
+      expect(readFileSync(out.scriptPath!, "utf8")).toBe(src)
+    }
+    for (let i = 0; i < 3; i++) expect(p.resultOf(await p.notification(i))).toBe("fenced")
+    // A fence that does not wrap the whole input is part of the script.
+    const inner = script("const md = `\n" + FENCE + "js\nx\n" + FENCE + "\n`\nreturn md.length")
+    const out = await p.callScript({ script: inner })
+    expect(readFileSync(out.scriptPath!, "utf8")).toBe(inner)
+  })
+
+  test("X24 its permission key is `workflow`: denied with it in every child session (P60) and by a user deny of `workflow`", async () => {
+    const p = await h.setup({ real: true })
+    expect(visibleTools(p.tools(), [])).toEqual(expect.arrayContaining(["workflow", "workflow_script"]))
+    await p.callScript({ script: script(`return await agent("a")`) })
+    await p.notification(0)
+    const child = p.fake.calls.create[0].permissions
+    const inChild = visibleTools(p.tools(), child)
+    expect(inChild).not.toContain("workflow")
+    expect(inChild).not.toContain("workflow_script")
+    // No separate rule: the `workflow` deny covers it.
+    expect(child.some((r: any) => r.action === "workflow_script")).toBe(false)
+    const denied = visibleTools(p.tools(), [{ action: "workflow", resource: "*", effect: "deny" }])
+    expect(denied).not.toContain("workflow")
+    expect(denied).not.toContain("workflow_script")
+    expect(denied).toContain("workflow_control")
+  })
+
+  for (const [what, setup] of [
+    ["plugin option freeformTool: false", { options: { freeformTool: false } }],
+    ['plugin option freeformTool: "off"', { options: { freeformTool: "off" } }],
+    ["OPENCODE_WORKFLOW_FREEFORM=0", { env: { OPENCODE_WORKFLOW_FREEFORM: "0" } }],
+    ["OPENCODE_WORKFLOW_FREEFORM=false", { env: { OPENCODE_WORKFLOW_FREEFORM: "false" } }],
+  ] as const) {
+    test(`X24 opt-out: ${what} removes workflow_script and keeps the workflow tool`, async () => {
+      const p = await h.setup(setup as any)
+      expect(p.tools().has("workflow_script")).toBe(false)
+      expect(p.tools().has("workflow")).toBe(true)
+      // No freeform filter; the only "context" hook left is the X22 steering-window one.
+      expect(p.fake.sessionHooks.filter((x) => x.name === "context")).toHaveLength(1)
+    })
+  }
+
+  test("X24 a model whose capabilities lack text freeform does not see workflow_script (context hook); one that lists it, or an unknown model, does", async () => {
+    const models = [
+      { id: "gpt-5.4-mini", providerID: "openai", freeform: ["text", "lark"] },
+      { id: "claude-haiku-4-5", providerID: "anthropic" },
+      { id: "regex-only", providerID: "openai", freeform: ["regex"] },
+    ]
+    const p = await h.setup({ fake: { models } })
+    const event = (providerID: string, id: string) => ({
+      sessionID: SESSION,
+      agent: "build",
+      model: { providerID, id },
+      tools: { workflow: { description: "w", input: {} }, workflow_script: { description: "s", input: {} }, read: { description: "r", input: {} } },
+    })
+    const names = async (providerID: string, id: string) =>
+      Object.keys((await p.fake.triggerSessionHook("context", event(providerID, id))).tools).sort()
+    expect(await names("openai", "gpt-5.4-mini")).toEqual(["read", "workflow", "workflow_script"])
+    expect(await names("anthropic", "claude-haiku-4-5")).toEqual(["read", "workflow"])
+    expect(await names("openai", "regex-only")).toEqual(["read", "workflow"])
+    expect(await names("nowhere", "unknown")).toEqual(["read", "workflow", "workflow_script"])
+    // The model list is read once and reused.
+    expect(p.fake.calls.modelList).toBe(1)
+  })
+
+  test("X24 the authoring reference tells the model to send a new inline script through workflow_script as raw text when it is offered", () => {
+    const calling = AUTHORING_REFERENCE.slice(AUTHORING_REFERENCE.indexOf("## Calling the tool"), AUTHORING_REFERENCE.indexOf("## The meta block"))
+    expect(calling).toMatch(/`workflow_script`/)
+    expect(calling).toMatch(/raw text/)
   })
 })

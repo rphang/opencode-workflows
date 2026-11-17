@@ -80,14 +80,14 @@ function store(runs: RunView[] = [run()], agents: AgentView[] = []): TreeStore {
 }
 
 describe("X14 package entry and footer", () => {
-  test("X14 the package exposes a TUI entry: exports['./tui'] → dist/tui.js (shipped in files) and a root tui.tsx for directory installs", () => {
+  test("X14 the package exposes a TUI entry: exports['./tui'] → dist/tui.js (shipped in files), also for directory installs", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
     const tui = pkg.exports["./tui"]
     expect(tui).toBeDefined()
     expect(tui.import).toBe("./dist/tui.js")
     expect(pkg.files).toContain("dist")
-    expect(existsSync(join(root, "tui.tsx"))).toBe(true)
-    expect(readFileSync(join(root, "tui.tsx"), "utf8")).toMatch(/from "\.\/src\/tui\/index\.tsx"/)
+    // opencode 2.3+ resolves directory installs through `exports` too, so no root shim is needed.
+    expect(existsSync(join(root, "tui.tsx"))).toBe(false)
     // No new runtime dependency: the TUI modules come from the host.
     for (const dep of ["solid-js", "@opentui/core", "@opentui/solid"]) expect(pkg.dependencies[dep]).toBeUndefined()
     // The server entry never imports the TUI (it must load without the TUI peers).

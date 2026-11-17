@@ -3,11 +3,11 @@
 // what the transcript dir holds, session-scoped run management and scriptPath read permissions.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { listWorkflows } from "../../src/registry.ts"
-import { FakeRunner } from "../helpers/fake-runner.ts"
-import { createHarness, script, tag, type Harness } from "../helpers/plugin-harness.ts"
+import { FakeRunner, sleep } from "../helpers/fake-runner.ts"
+import { createHarness, script, SESSION, tag, tctx, waitFor, type Harness } from "../helpers/plugin-harness.ts"
 
 let h: Harness
 beforeEach(async () => {
@@ -239,5 +239,222 @@ describe("P76 scriptPath reads follow opencode's file permissions", () => {
     const res = p.resultOf(await p.notification(0)) as string[]
     expect(res[0]).toMatch(/outside the project/)
     expect(res[1]).toMatch(/UNC|device/)
+  })
+})
+
+// opencode 2.3.0 ctx.permission.assert: the plugin asks through opencode's own prompt in the calling
+// session (a root session the user sees), with the same resources opencode's read tool uses, and
+// honours saved "always" approvals. Without it (older hosts) the rules are evaluated as above.
+describe("P76 scriptPath approval through ctx.permission.assert", () => {
+  const body = (v: string) => script(`return ${JSON.stringify(v)}`)
+  const outsideDir = () => join(h.base, "outside")
+  const writeOutside = (v: string) => {
+    mkdirSync(outsideDir(), { recursive: true })
+    const file = join(outsideDir(), "flow.js")
+    writeFileSync(file, body(v))
+    return file
+  }
+  const slash = (p: string) => p.replaceAll("\\", "/")
+  // opencode's default agents allow reading everything (except .env files).
+  const readAll = { action: "read", resource: "*", effect: "allow" }
+
+  test("P76 an outside path asks for external_directory in the calling session, tied to the tool call; approving runs it", async () => {
+    // The plugin asks with the canonical spelling (realpathSync.native: Windows 8.3 short names such
+    // as RUNNER~1 expanded); plain realpathSync keeps them, so the expectation uses .native too.
+    const file = writeOutside("approved")
+    const p = await h.setup({ fake: { permissionAsk: () => "once", parent: { permissions: [readAll] } } })
+    const out = await p.call({ scriptPath: file })
+    expect(out.error).toBeUndefined()
+    expect(p.resultOf(await p.notification(0))).toBe("approved")
+    const asked = p.fake.calls.asked
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({
+      sessionID: SESSION,
+      agent: "build",
+      action: "external_directory",
+      resources: [slash(join(realpathSync.native(outsideDir()), "*"))],
+      save: [slash(join(realpathSync.native(outsideDir()), "*"))],
+      source: { type: "tool", messageID: "msg_1", id: "call_1" },
+    })
+    // The read check goes through opencode too (allowed by the read rule, so no second prompt).
+    expect(p.fake.calls.assert.map((a) => a.action)).toEqual(["external_directory", "read"])
+  })
+
+  test("P76 an \"always\" approval is saved: the next launch from that directory does not ask again", async () => {
+    const file = writeOutside("again")
+    const p = await h.setup({ fake: { permissionAsk: () => "always", parent: { permissions: [readAll] } } })
+    expect((await p.call({ scriptPath: file })).error).toBeUndefined()
+    await p.notification(0)
+    const asked = p.fake.calls.asked.filter((r) => r.action === "external_directory").length
+    expect((await p.call({ scriptPath: file })).error).toBeUndefined()
+    await p.notification(1)
+    expect(p.fake.calls.asked.filter((r) => r.action === "external_directory").length).toBe(asked)
+  })
+
+  test("P76 a rejected prompt fails the tool call itself, as for opencode's own tools; nothing runs or is copied", async () => {
+    const file = writeOutside("never")
+    const p = await h.setup({ fake: { permissionAsk: () => "reject" } })
+    const tool = p.tools().get("workflow")!
+    let thrown: any
+    try {
+      await tool.execute({ scriptPath: file }, tctx())
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown?._tag).toBe("Permission.DeclinedError")
+    expect(await h.store.listRuns()).toEqual([])
+    expect(p.notifications()).toHaveLength(0)
+  })
+
+  test("P76 a rejection with feedback, or a deny rule, is the tool's error (a deny never prompts)", async () => {
+    const file = writeOutside("never")
+    const p = await h.setup({ fake: { permissionAsk: () => ({ reject: "use the project copy" }) } })
+    const out = await p.call({ scriptPath: file })
+    expect(out.error).toMatch(/outside the project.*external_directory/)
+    expect(out.error).toContain("use the project copy")
+    expect(out.transcriptDir).toBeUndefined()
+
+    const denyRule = { action: "external_directory", resource: slash(join(outsideDir(), "*")), effect: "deny" }
+    const q = await h.setup({ fake: { permissionAsk: () => "once", parent: { permissions: [denyRule] } } })
+    const denied = await q.call({ scriptPath: file })
+    expect(denied.error).toMatch(/outside the project.*external_directory/)
+    expect(q.fake.calls.asked).toHaveLength(0)
+  })
+
+  test("P76 a read rule that asks prompts for the project file; a read deny refuses without a prompt", async () => {
+    writeFileSync(join(h.projectDir, "flow.secret.js"), body("secret-ok"))
+    const ask = { action: "read", resource: "*.secret.js", effect: "ask" }
+    const p = await h.setup({ fake: { permissionAsk: () => "once", parent: { permissions: [readAll, ask] } } })
+    const out = await p.call({ scriptPath: "flow.secret.js" })
+    expect(out.error).toBeUndefined()
+    expect(p.fake.calls.asked).toMatchObject([{ action: "read", resources: ["flow.secret.js"] }])
+    expect(p.resultOf(await p.notification(0))).toBe("secret-ok")
+
+    const deny = { action: "read", resource: "*.secret.js", effect: "deny" }
+    const q = await h.setup({ fake: { permissionAsk: () => "once", parent: { permissions: [deny] } } })
+    expect((await q.call({ scriptPath: "flow.secret.js" })).error).toMatch(/read permission/)
+    expect(q.fake.calls.asked).toHaveLength(0)
+  })
+
+  test("P76 workflow({scriptPath}) inside a running script never prompts: an ask is refused, a saved approval admits it", async () => {
+    const file = writeOutside("nested-ok")
+    const p = await h.setup({ fake: { permissionAsk: () => "always", parent: { permissions: [readAll] } } })
+    const nested = script(`try { return await workflow({ scriptPath: ${JSON.stringify(file)} }) } catch (e) { return "refused: " + e.message }`)
+    await p.call({ script: nested })
+    expect(String(p.resultOf(await p.notification(0)))).toMatch(/^refused: .*outside the project/)
+    expect(p.fake.calls.asked).toHaveLength(0)
+    // Approved "always" from a tool call (the user saw that prompt): the nested call is admitted.
+    expect((await p.call({ scriptPath: file })).error).toBeUndefined()
+    await p.notification(1)
+    await p.call({ script: nested })
+    expect(p.resultOf(await p.notification(2))).toBe("nested-ok")
+  })
+
+  test("P76 a rule spelled through a directory alias still admits the path without a prompt", async () => {
+    writeFileSync(join(h.base, "outside.js"), body("alias-ok"))
+    const alias = `${h.base}-alias`
+    symlinkSync(h.base, alias, "junction")
+    try {
+      const rule = { action: "external_directory", resource: join(alias, "*"), effect: "allow" }
+      const p = await h.setup({
+        fake: {
+          permissionAsk: () => {
+            throw new Error("unexpected prompt")
+          },
+          parent: { permissions: [readAll, rule] },
+        },
+      })
+      const out = await p.call({ scriptPath: join(alias, "outside.js") })
+      expect(out.error).toBeUndefined()
+      expect(p.resultOf(await p.notification(0))).toBe("alias-ok")
+    } finally {
+      rmSync(alias, { recursive: false, force: true })
+    }
+  })
+})
+
+// Review follow-ups: a prompt must not outlive its tool call, a deny on any spelling wins, and a
+// check inside a running script must fail closed whatever other evaluate hooks do.
+describe("P76 approval prompts never outlive their caller", () => {
+  const body = (v: string) => script(`return ${JSON.stringify(v)}`)
+  const readAll = { action: "read", resource: "*", effect: "allow" }
+  const outsideFile = (v: string) => {
+    const dir = join(h.base, "outside")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "flow.js"), body(v))
+    return join(dir, "flow.js")
+  }
+  const never = () => new Promise<never>(() => {})
+
+  test("P76 cancelling the tool call while its prompt is open rejects the prompt and starts no run", async () => {
+    const file = outsideFile("cancelled")
+    const p = await h.setup({ fake: { permissionAsk: never, parent: { permissions: [readAll] } } })
+    const ac = new AbortController()
+    const pending = p.tools().get("workflow")!.execute({ scriptPath: file }, { ...tctx(), signal: ac.signal })
+    const settled = pending.then(
+      (r: any) => ({ out: JSON.parse(r.content) }),
+      (e: unknown) => ({ thrown: e }),
+    )
+    await waitFor(() => p.fake.pendingPermissions.size === 1, "the prompt")
+    const [requestID] = [...p.fake.pendingPermissions.keys()]
+    ac.abort()
+    const res: any = await settled
+    expect(res.out?.error ?? String(res.thrown)).toMatch(/cancel/i)
+    expect(p.fake.pendingPermissions.size).toBe(0)
+    expect(p.fake.calls.permissionReply).toEqual([{ sessionID: SESSION, requestID, decision: "reject" }])
+    await sleep(30)
+    expect(await h.store.listRuns()).toEqual([])
+    expect(p.notifications()).toHaveLength(0)
+  })
+
+  test("P76 a launch without a prompt does not read the call's signal (no cooperative-stop opt-in)", async () => {
+    const p = await h.setup({ fake: { permissionAsk: never } })
+    let read = 0
+    const ctx = tctx()
+    const call = Object.defineProperty({ ...ctx }, "signal", {
+      get: () => {
+        read++
+        return ctx.signal
+      },
+    })
+    const res = await p.tools().get("workflow")!.execute({ script: body("x") }, call)
+    expect(JSON.parse(res.content).error).toBeUndefined()
+    expect(read).toBe(0)
+  })
+
+  test("P76 a deny rule on any spelling of the directory refuses, even when another spelling is allowed", async () => {
+    writeFileSync(join(h.base, "outside.js"), body("denied"))
+    const alias = `${h.base}-alias`
+    symlinkSync(h.base, alias, "junction")
+    try {
+      const rules = [readAll, { action: "external_directory", resource: join(h.base, "*"), effect: "allow" }, { action: "external_directory", resource: join(alias, "*"), effect: "deny" }]
+      for (const fake of [{ parent: { permissions: rules } }, { permissionAsk: () => "once" as const, parent: { permissions: rules } }]) {
+        const p = await h.setup({ fake })
+        const out = await p.call({ scriptPath: join(alias, "outside.js") })
+        expect(out.error).toMatch(/outside the project.*external_directory/)
+        expect(out.transcriptDir).toBeUndefined()
+        expect(p.fake.calls.asked).toHaveLength(0)
+      }
+    } finally {
+      rmSync(alias, { recursive: false, force: true })
+    }
+  })
+
+  test("P76 workflow({scriptPath}) inside a running script fails closed even when another plugin's evaluate hook re-asks", async () => {
+    const file = outsideFile("never")
+    const p = await h.setup({ fake: { permissionAsk: never, parent: { permissions: [readAll] } }, deps: { unattendedAssertTimeoutMs: 50 } })
+    // A later plugin's hook that turns every deny back into an ask (core runs hooks in order).
+    p.fake.permissionHooks.push({
+      name: "evaluate",
+      cb: (e: any) => {
+        e.effect = "ask"
+      },
+    })
+    await p.call({ script: script(`try { return await workflow({ scriptPath: ${JSON.stringify(file)} }) } catch (e) { return "refused: " + e.message }`) })
+    expect(String(p.resultOf(await p.notification(0)))).toMatch(/^refused: .*outside the project.*cannot ask/)
+    expect(p.fake.calls.asked).toHaveLength(1)
+    // The prompt it raised was rejected again, not left in the session.
+    expect(p.fake.pendingPermissions.size).toBe(0)
+    expect(p.fake.calls.permissionReply.map((r) => r.decision)).toEqual(["reject"])
   })
 })

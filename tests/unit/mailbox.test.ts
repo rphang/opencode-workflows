@@ -198,3 +198,59 @@ describe("AgentMailbox limits", () => {
     expect(mb.accepted()).toBe(1)
   })
 })
+
+describe("AgentMailbox quiesce (X22 idle hook)", () => {
+  test("quiesce: open → finishing, awaits in-flight sends, and keeps the window's sends for close()", async () => {
+    const mb = new AgentMailbox()
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let k = 0
+    mb.attach(async () => {
+      await gate
+      return { id: `del_${++k}` }
+    })
+    mb.open()
+    const first = mb.post(msg("in flight"))
+    let quiesced: unknown
+    const q = mb.quiesce().then((sent) => (quiesced = sent))
+    expect(mb.state).toBe("finishing")
+    expect(await mb.post(msg("after"))).toEqual({ ok: false, reason: "finishing" })
+    await Promise.resolve()
+    expect(quiesced).toBeUndefined() // still waiting for the send
+    release()
+    await q
+    expect(await first).toMatchObject({ ok: true, state: "sent" })
+    expect(quiesced).toEqual([{ id: expect.any(String), deliveryId: "del_1" }])
+    // close() still returns them: the runner verifies them as before.
+    expect((await mb.close()).map((s) => s.deliveryId)).toEqual(["del_1"])
+  })
+
+  test("reopen() undoes only quiesce(): not a window the runner closed, opened or sealed since", async () => {
+    const mb = new AgentMailbox()
+    mb.attach(async () => ({ id: "d" }))
+    mb.open()
+    await mb.quiesce()
+    expect(mb.reopen()).toBe(true)
+    expect(mb.state).toBe("open")
+    expect(mb.reopen()).toBe(false) // already open
+    await mb.quiesce()
+    await mb.close() // the runner took the window over
+    expect(mb.reopen()).toBe(false)
+    expect(mb.state).toBe("finishing")
+    mb.open()
+    await mb.quiesce()
+    mb.seal()
+    expect(mb.reopen()).toBe(false)
+    expect(mb.state).toBe("closed")
+  })
+
+  test("quiesce leaves a mailbox that is not open as it is (between turns, closed)", async () => {
+    const mb = new AgentMailbox()
+    mb.attach(async () => ({ id: "d" }))
+    expect(await mb.quiesce()).toEqual([])
+    expect(mb.state).toBe("between")
+    mb.seal()
+    await mb.quiesce()
+    expect(mb.state).toBe("closed")
+  })
+})

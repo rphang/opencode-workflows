@@ -1,13 +1,14 @@
-// opencode permission rules as seen by the plugin: evaluation mirrors opencode 2.0.15
+// opencode permission rules as seen by the plugin: evaluation mirrors opencode 2.0.15–2.3.0 (unchanged)
 // (core/src/permission.ts `evaluate`: rulesets are flattened, the LAST matching rule wins, no match
 // means "ask"; core/src/util/wildcard.ts `match`). A session's effective rules are its agent's rules
 // followed by the session's own `permissions` (docs/OPENCODE-API-NOTES.md "Permissions").
 //
-// Plugins cannot call opencode's permission.assert (it would need a tool invocation to ask the
-// user), so the plugin evaluates the rules itself and treats "ask" as "not allowed" wherever it
-// cannot ask (fail closed), except where noted by the caller.
+// Where the plugin cannot ask (opencode before 2.3.0 has no ctx.permission.assert; see
+// permission-assert.ts for where it now asks), it evaluates the rules itself and treats "ask" as
+// "not allowed" (fail closed), except where noted by the caller.
 
 import type { Plugin } from "@opencode/plugin"
+import { createWorkflowChildLookup } from "./children.ts"
 
 export interface PermissionRule {
   action: string
@@ -107,28 +108,10 @@ export interface PermissionEvaluationEvent {
  * (including the one loaded in a worktree) guards its own children.
  */
 export function createChildAskGuard(ctx: Pick<Plugin.Context, "session">, cacheLimit = 4096) {
-  const known = new Map<string, Promise<boolean>>()
-  const isWorkflowChild = (sessionID: string): Promise<boolean> => {
-    let p = known.get(sessionID)
-    if (!p) {
-      p = (async () => {
-        try {
-          // Deferred so a synchronous throw also lands after the cache entry is set (and is removed).
-          const info = (await Promise.resolve().then(() => ctx.session.get({ sessionID } as any))) as any
-          return typeof info?.metadata?.workflowRunId === "string"
-        } catch {
-          known.delete(sessionID) // unknown / transient failure: not cached
-          return false
-        }
-      })()
-      if (known.size >= cacheLimit) known.clear()
-      known.set(sessionID, p)
-    }
-    return p
-  }
+  const workflowRunOf = createWorkflowChildLookup(ctx, cacheLimit)
   return async (event: PermissionEvaluationEvent): Promise<void> => {
     if (event.effect !== "ask" || !event.sessionID) return
-    if (!(await isWorkflowChild(event.sessionID))) return
+    if ((await workflowRunOf(event.sessionID)) === undefined) return
     event.effect = "deny"
     event.message = CHILD_ASK_DENIED_MESSAGE
   }

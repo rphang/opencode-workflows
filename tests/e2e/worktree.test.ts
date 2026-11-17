@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): isolation:'worktree' runs agents in fresh git worktrees; an unchanged
+// Live e2e (real opencode CLI): isolation:'worktree' runs agents in fresh git worktrees; an unchanged
 // worktree is removed, a changed one is kept and reported (P28). Enable with OPENCODE_E2E=1.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync, readdirSync, readFileSync } from "node:fs"

@@ -30,12 +30,15 @@ deciding the next.
 - \`scriptPath\`: re-run a persisted (possibly edited) script. Takes precedence over \`script\` and \`name\`.
   To iterate, edit that file and re-invoke with \`{scriptPath}\` instead of resending the whole script.
   Only local files are read: inside the project, the run's own copy, the personal workflows dir, or a
-  directory opencode's \`external_directory\` permission allows; UNC paths are refused.
+  directory opencode's \`external_directory\` permission allows (the user may be asked); UNC paths are refused.
 - \`name\`: run a saved or bundled workflow by its \`meta.name\`.
 - \`args\`: any JSON value, exposed verbatim as the global \`args\` (\`undefined\` when omitted). Pass arrays
   and objects as real JSON values — \`args: ["a.ts", "b.ts"]\`, NOT \`args: "[\\"a.ts\\"]"\` (a stringified
   list reaches the script as one string and \`args.map\` throws).
 - \`resumeFromRunId\`: relaunch a previous run, reusing its cached agent results (see Resume).
+- If a \`workflow_script\` tool is offered, send a NEW inline script through it as raw text: its whole
+  input is the script source, starting with \`export const meta\`, with no code fence and no JSON wrapper.
+  Use the \`workflow\` tool for \`scriptPath\`, \`name\`, \`args\`, \`resumeFromRunId\` or a budget.
 
 The tool returns immediately with \`{status: "async_launched", runId, taskId, scriptPath, transcriptDir}\`.
 If the script fails its syntax/meta check the result carries \`error\` and nothing runs — fix and relaunch.
@@ -154,11 +157,11 @@ outside the project) is denied, so put everything they need in the prompt.
 - Plain JavaScript, NOT TypeScript: type annotations (\`: string[]\`), interfaces and generics fail to parse.
 - No \`import\`, \`import()\` or \`require\`; no filesystem, shell, network or Node API. Agents do that
   work; the script only coordinates them.
-- Not supported by the interpreter: \`class\` declarations, \`this\`, getter/setter accessors,
-  \`globalThis\`, \`Object.freeze\`. Use plain objects, closures and arrow functions.
+- Not supported by the interpreter: \`class\` declarations, getter/setter accessors, \`new\` on your
+  own functions, \`globalThis\`. Use plain objects, closures and arrow functions.
 - Available: async/await, closures, destructuring, spread, Promise, Map, Set, JSON, Math, RegExp,
   Array methods, \`new Date(x)\` with an argument.
-- **Determinism**: \`Date.now()\`, \`Math.random()\` and a no-argument \`new Date()\` throw — they would
+- **Determinism**: \`Date.now()\`, \`Math.random()\`, \`crypto.randomUUID()\` and a no-argument \`new Date()\` throw — they would
   break resume. Pass timestamps in through \`args\`, stamp results after the workflow returns, and
   vary prompts or labels by index instead of randomness.
 
@@ -335,6 +338,6 @@ API:
 - pipeline(items, ...stages) → per-item stages, no barrier; stages get (prev, item, index); a throwing stage yields null. The default for multi-stage work.
 - parallel(thunks) → barrier; never rejects, failed thunks yield null.
 - phase(title), log(message), budget {total, spent(), remaining()}, workflow(nameOrRef, args?) (one nesting level).
-Always .filter(Boolean) results. Limits: 4096 items per parallel/pipeline call, 1000 agents per run, concurrency min(16, CPUs-2). No import/require, filesystem or network in the script; no class, this, getters or globalThis. Date.now(), Math.random() and new Date() without arguments throw (they break resume) — pass timestamps via args.
+Always .filter(Boolean) results. Limits: 4096 items per parallel/pipeline call, 1000 agents per run, concurrency min(16, CPUs-2). No import/require, filesystem or network in the script; no class, getters or globalThis. Date.now(), Math.random(), crypto.randomUUID() and new Date() without arguments throw (they break resume) — pass timestamps via args.
 
 Load the full reference with /workflow-authoring before writing a non-trivial script.`

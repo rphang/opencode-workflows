@@ -17,6 +17,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createPlugin } from "../../src/index.ts"
 import { isRunActive } from "../../src/engine.ts"
+import { wildcardMatch, type PermissionRule } from "../../src/opencode/permissions.ts"
 import { createOpencodeRunner } from "../../src/opencode/runner.ts"
 import type { PluginDeps } from "../../src/plugin/setup.ts"
 import { RunStore } from "../../src/store.ts"
@@ -30,6 +31,7 @@ export interface Registered {
   name: string
   description: string
   input: any
+  freeform?: { type: string }
   options?: any
   execute: (input: any, tctx: any) => Promise<any>
 }
@@ -57,6 +59,21 @@ export async function waitFor(cond: () => boolean, what = "condition", ms = 5000
     if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`)
     await sleep(5)
   }
+}
+
+/**
+ * The tools a session with `rules` is offered, mirroring opencode 2.3.0's tool snapshot
+ * (core/src/tool.ts `whollyDisabled(tool.options?.permission ?? name, rules)`): a tool is hidden when
+ * the last rule whose action matches its permission key is a deny for resource `*`.
+ */
+export function visibleTools(tools: Map<string, Registered>, rules: readonly PermissionRule[]): string[] {
+  return [...tools.values()]
+    .filter((t) => {
+      const key = typeof t.options?.permission === "string" ? t.options.permission : t.name
+      const rule = [...rules].reverse().find((r) => wildcardMatch(key, r.action))
+      return !(rule?.resource === "*" && rule.effect === "deny")
+    })
+    .map((t) => t.name)
 }
 
 /** `export const meta = <meta>\n<body>` */
@@ -256,6 +273,12 @@ function extend(p: ReturnType<typeof makePluginCtx>, runner: FakeRunner, cleanup
       const res = await tool.execute(input, tctx(sessionID, agent))
       return JSON.parse(res.content)
     },
+    /** `workflow_script` tool execute (X24) → parsed WorkflowOutput. */
+    async callScript(input: any, sessionID = SESSION, agent = "build"): Promise<WorkflowOutput> {
+      const tool = p.tools().get("workflow_script")!
+      const res = await tool.execute(input, tctx(sessionID, agent))
+      return JSON.parse(res.content)
+    },
     async control(input: any, sessionID = SESSION): Promise<string> {
       const res = await p.tools().get("workflow_control")!.execute(input, tctx(sessionID))
       return typeof res.content === "string" ? res.content : res.content.map((c: any) => c.text).join("")
@@ -325,12 +348,14 @@ export async function createHarness(): Promise<Harness> {
       opts.ctx?.(p.ctx)
       const runner = opts.runner ?? new FakeRunner()
       const createRunner: PluginDeps["createRunner"] = opts.real
-        ? ({ ctx, parentSessionID, parentAgent, runId, registry }) =>
+        ? ({ ctx, parentSessionID, parentAgent, runId, registry, live, jobs }) =>
             createOpencodeRunner(ctx as any, {
               parentSessionID,
               parentAgent,
               runId,
               registry,
+              live,
+              jobs,
               deniedTools: ["workflow", "workflow_control"],
               git: p.fake.git,
             })

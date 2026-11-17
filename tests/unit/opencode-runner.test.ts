@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createOpencodeRunner, STRUCTURED_SUBAGENT_PREAMBLE, SUBAGENT_PREAMBLE } from "../../src/opencode/runner.ts"
 import { evaluatePermission } from "../../src/opencode/permissions.ts"
-import { createSubmitRegistry, createSubmitTool, SUBMIT_STORAGE_PREFIX } from "../../src/opencode/submit.ts"
+import {
+  attemptsUsed,
+  createSubmitRegistry,
+  createSubmitTool,
+  currentAttemptMissed,
+  retryPrompt,
+  SUBMIT_STORAGE_PREFIX,
+} from "../../src/opencode/submit.ts"
 import { EFFORT_VARIANTS, formatModelRef, parseModelRef, resolveChildModel } from "../../src/opencode/model.ts"
 import type { AgentOptions, AgentRecord, AgentRequest } from "../../src/types.ts"
 import { createFakeCtx, type FakeCtxOptions } from "../helpers/fake-opencode-ctx.ts"
@@ -206,6 +213,110 @@ describe("submit.ts", () => {
     expect((await a.read("s1"))?.accepted).toEqual({ value: { answer: "z" } })
     await a.unregister("s1")
     expect(storage.has(SUBMIT_STORAGE_PREFIX + "s1")).toBe(false)
+  })
+
+  const sharedStore = () => {
+    const storage = new Map<string, unknown>()
+    return {
+      storage,
+      get: async (k: string) => structuredClone(storage.get(k)) as any,
+      set: async (k: string, v: unknown) => void storage.set(k, structuredClone(v)),
+      remove: async (k: string) => void storage.delete(k),
+    }
+  }
+
+  test("P21 X23 copies are ordered by a monotonic rev: another instance's nudge (no new failure) is not dropped", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    const b = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    expect((await a.read("s1"))?.rev).toBe(1)
+    await b.nextAttempt("s1", "nudge")
+    // a's memory copy has the same failures (0) but an older rev: storage wins.
+    expect(await a.read("s1")).toMatchObject({ failures: 0, missed: 1, nudges: 1, mark: 0, rev: 2 })
+  })
+
+  test("P21 X23 an accepted copy still wins over a newer rev without acceptance", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    await a.submit("s1", { answer: "x" })
+    const stale = { schema: SCHEMA, failures: 0, rev: 9 }
+    store.storage.set(SUBMIT_STORAGE_PREFIX + "s1", stale)
+    expect((await a.read("s1"))?.accepted).toEqual({ value: { answer: "x" } })
+  })
+
+  test("P21 X23 attempt accounting: a stop after an invalid submission is not a missed attempt; a stop without one is", async () => {
+    const registry = createSubmitRegistry()
+    await registry.register("s1", SCHEMA)
+    let st = (await registry.read("s1"))!
+    expect(currentAttemptMissed(st)).toBe(true)
+    expect(attemptsUsed(st)).toBe(1) // the first attempt ended without a submission
+    await registry.submit("s1", { answer: 1 })
+    st = (await registry.read("s1"))!
+    expect(currentAttemptMissed(st)).toBe(false)
+    expect(attemptsUsed(st)).toBe(1) // the invalid submission is the attempt: not counted twice
+    expect(retryPrompt(st)).toContain("failed schema validation")
+    st = (await registry.nextAttempt("s1", "prompt"))!
+    expect(st).toMatchObject({ failures: 1, missed: 0, mark: 1, nudges: 0 })
+    expect(attemptsUsed(st)).toBe(2) // that new attempt, if it ends now, missed
+    expect(retryPrompt(st)).toContain("did not call")
+    st = (await registry.nextAttempt("s1", "nudge"))!
+    expect(st).toMatchObject({ failures: 1, missed: 1, mark: 1, nudges: 1 })
+    expect(attemptsUsed(st)).toBe(3)
+  })
+
+  test("P21 two parallel workflow_submit calls in one instance both count (no lost update)", async () => {
+    const store = sharedStore()
+    // Reads take a while: both calls read the same state unless the registry serializes them.
+    const slow = {
+      ...store,
+      get: async (k: string) => {
+        const v = await store.get(k)
+        await new Promise((r) => setTimeout(r, 5))
+        return v
+      },
+    }
+    const registry = createSubmitRegistry(slow)
+    await registry.register("s1", SCHEMA)
+    const results = await Promise.all([registry.submit("s1", { answer: 1 }), registry.submit("s1", { answer: 2 })])
+    expect(results.map((r) => r.status)).toEqual(["invalid", "invalid"])
+    expect((await registry.read("s1"))?.failures).toBe(2)
+    expect((store.storage.get(SUBMIT_STORAGE_PREFIX + "s1") as any).failures).toBe(2)
+  })
+
+  test("P21 X23 another instance's stale copy cannot rewrite storage after the runner unregistered", async () => {
+    const store = sharedStore()
+    const runnerSide = createSubmitRegistry(store)
+    const worktree = createSubmitRegistry(store)
+    await runnerSide.register("s1", SCHEMA)
+    await worktree.submit("s1", { answer: 1 }) // the worktree instance now holds a memory copy
+    await runnerSide.unregister("s1")
+    expect(await worktree.submit("s1", { answer: "late" })).toEqual({ status: "unknown_session" })
+    expect(await worktree.nextAttempt("s1", "nudge")).toBeUndefined()
+    expect(await worktree.read("s1")).toBeUndefined()
+    expect(store.storage.has(SUBMIT_STORAGE_PREFIX + "s1")).toBe(false)
+  })
+
+  test("P21 X23 equal revs: the stored copy (the latest write) wins over the local one", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    await a.nextAttempt("s1", "prompt") // a: rev 2 in memory and storage
+    const other = { ...(store.storage.get(SUBMIT_STORAGE_PREFIX + "s1") as any), failures: 1, lastError: "from b" }
+    store.storage.set(SUBMIT_STORAGE_PREFIX + "s1", other) // another instance's write from the same base: also rev 2
+    expect((await a.read("s1"))?.lastError).toBe("from b")
+  })
+
+  test("P21 X23 the tool's `no attempts left` counts missed attempts too", async () => {
+    process.env.MAX_STRUCTURED_OUTPUT_RETRIES = "3"
+    const registry = createSubmitRegistry()
+    const tool = createSubmitTool(registry)
+    await registry.register("s1", SCHEMA)
+    await registry.nextAttempt("s1", "nudge")
+    await registry.nextAttempt("s1", "nudge")
+    const r = await tool.execute({ output: {} }, { sessionID: "s1" } as any)
+    expect(String(r.content)).toMatch(/no attempts left/i)
   })
 })
 
@@ -455,6 +566,50 @@ describe("createOpencodeRunner", () => {
     const out = await runner.run(req("x").request)
     expect(out.status).toBe("failed")
     if (out.status === "failed") expect(out.error).toMatch(/failed/)
+  })
+
+  test("P23 2.3.0: a failed turn with no assistant message reports the failed idle marker's error", async () => {
+    const { runner } = setup({
+      respond: () => ({ outcome: "failed", noAssistant: true, idleError: { type: "provider.auth", message: "invalid api key", status: 401 } }),
+    })
+    const out = await runner.run(req("x").request)
+    expect(out.status).toBe("failed")
+    if (out.status === "failed") expect(out.error).toBe("provider.auth: invalid api key")
+  })
+
+  test("P23 2.3.0: the failed idle marker's error wins over an assistant message's error", async () => {
+    const { runner } = setup({
+      respond: () => ({ outcome: "failed", error: { type: "api", message: "stream broke" }, idleError: { type: "api", message: "rate limited" } }),
+    })
+    const out = await runner.run(req("x").request)
+    if (out.status !== "failed") throw new Error(`expected failed, got ${out.status}`)
+    expect(out.error).toBe("api: rate limited")
+  })
+
+  test("P23 2.3.0: an interrupted step's aborted error is not reported as the failure", async () => {
+    let interrupted = false
+    const { fake, runner } = setup({
+      respond: ({ turn }) =>
+        turn === 0
+          ? {
+              steps: 10,
+              stepDelayMs: 5,
+              text: "partial",
+              onStep: async (i) => {
+                if (i === 1 && !interrupted) {
+                  interrupted = true
+                  await fake.ctx.session.interrupt({ sessionID: fake.children()[0]!.info.id, resume: true })
+                }
+              },
+            }
+          : { outcome: "failed", noAssistant: true },
+    })
+    const out = await runner.run(req("x").request)
+    if (out.status !== "failed") throw new Error(`expected failed, got ${out.status}`)
+    // The interrupted step's message carries {type:"aborted"}; the successor failed with no error text.
+    expect(fake.children()[0]!.messages.some((m) => m.error?.type === "aborted")).toBe(true)
+    expect(out.error).not.toMatch(/aborted|Step interrupted/)
+    expect(out.error).toBe("agent session failed (terminal error)")
   })
 
   test("P51 child interrupted from outside (not our abort) counts as failed", async () => {

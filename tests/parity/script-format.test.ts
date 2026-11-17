@@ -219,6 +219,25 @@ describe("P15 determinism guards", () => {
     expect(await probe(p, `new Date(0) instanceof Date`)).toBe("ok:true")
   })
 
+  test("P15 module loading cannot reach the native Math/Date (require alias, import())", async () => {
+    const p = await h.setup()
+    // Direct require()/import() calls are rejected statically (P16); an alias must not reach
+    // codemode's module loader either (2.3+: require("Math") returns the native Math).
+    expect(await probe(p, `(() => { const r = require; return r("Math").random() })()`)).toMatch(/^threw:/)
+    expect(await probe(p, `(() => { const r = require; return r("Date").now() })()`)).toMatch(/^threw:/)
+  })
+
+  test("P15 import() is rejected before the run starts", async () => {
+    const p = await h.setup()
+    await rejected(p, script(`const m = await import("Math"); return m.default.random()`), /import\(\) is not allowed/)
+  })
+
+  test("P15 crypto randomness throws (breaks resume)", async () => {
+    const p = await h.setup()
+    expect(await probe(p, "crypto.randomUUID()")).toMatch(/^threw:.*crypto\.randomUUID\(\).*not available/)
+    expect(await probe(p, "crypto.getRandomValues([0])")).toMatch(/^threw:.*not available/)
+  })
+
   test("P15 an uncaught Date.now() fails the run with a resume-oriented message", async () => {
     const p = await h.setup()
     await p.call({ script: script(`return Date.now()`) })
@@ -233,7 +252,7 @@ describe("P16 no host access", () => {
     const p = await h.setup()
     await p.call({
       script: script(
-        `return [typeof process, typeof fetch, typeof globalThis, typeof Bun, typeof setTimeout, typeof eval, typeof Deno, typeof window, typeof XMLHttpRequest]`,
+        `return [typeof require, typeof process, typeof fetch, typeof globalThis, typeof Bun, typeof setTimeout, typeof eval, typeof Deno, typeof window, typeof XMLHttpRequest]`,
       ),
     })
     const res = p.resultOf(await p.notification(0)) as string[]

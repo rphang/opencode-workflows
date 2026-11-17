@@ -35,6 +35,11 @@ If the script fails its syntax or meta check, the result also has `error` set an
 Every launch persists the script and returns its path as `scriptPath`, so an edited copy can be
 relaunched with `{ scriptPath }`.
 
+`workflow_script` (extension, [PARITY](PARITY.md) X24) is the same launch with only `script`, for
+models that can send a tool's input as raw text: its whole input is the script source, with no JSON
+escaping. It is dropped for models whose capabilities do not list freeform text, and is turned off
+with the plugin option `freeformTool: false` or `OPENCODE_WORKFLOW_FREEFORM=0`.
+
 When the run finishes, stops or fails, its return value arrives in the parent session as a
 `<task-notification>`, with the status and usage (agent count, tokens, duration). That is the only
 way the result reaches the model. `workflow_control status` shows progress, never the result.
@@ -160,11 +165,14 @@ Scripts run in opencode's codemode interpreter, a restricted JavaScript interpre
 - **Plain JavaScript, not TypeScript.** Type annotations, interfaces and generics fail to parse.
 - **No `import`, `import()` or `require`.** No filesystem, shell, network or Node API. Agents do that
   work, and the script only coordinates them.
-- **Not supported:** `class`, `this`, getters and setters, `globalThis`, `Object.freeze`.
+- **Not supported:** `class`, getters and setters, `new` on your own functions, `globalThis`.
+  (`this` in non-arrow functions, `bind`/`call`/`apply`, `Object.freeze` and `WeakMap` work since
+  opencode 2.3.0, but plain objects and closures read better.)
 - **Available:** async/await, closures, arrow functions, destructuring, spread, template literals,
   `Promise`, `Map`, `Set`, `JSON`, `Math`, `RegExp`, array methods, and `new Date(x)` with an
   argument.
-- **Deterministic:** `Date.now()`, `Math.random()` and a no-argument `new Date()` throw, because they
+- **Deterministic:** `Date.now()`, `Math.random()`, `crypto.randomUUID()`/`getRandomValues()` and a
+  no-argument `new Date()` throw, because they
   would break resume. Pass timestamps in through `args`, and vary prompts by index instead of
   randomness.
 

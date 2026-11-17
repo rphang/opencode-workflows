@@ -22,6 +22,42 @@ export interface SubmitState {
   failures: number
   /** Validation error of the latest invalid submission. */
   lastError?: string
+  /**
+   * Attempts that ended without a new submission, counted when the next prompt (runner re-prompt) or
+   * nudge (idle hook, X23) went out. With `failures` they make up the P21 budget.
+   */
+  missed?: number
+  /** `failures` when the latest prompt or nudge went out: more failures now means this attempt submitted. */
+  mark?: number
+  /** Nudges the idle hook sent (X23). */
+  nudges?: number
+  /** Bumped on every save; orders the copies of two plugin instances (memory vs storage). */
+  rev?: number
+}
+
+/** The attempt in progress made no submission since the latest prompt or nudge. */
+export function currentAttemptMissed(state: SubmitState): boolean {
+  return state.failures <= (state.mark ?? 0)
+}
+
+/**
+ * Attempts used if the agent stopped now (P21): every invalid submission, every attempt that ended
+ * without one, and the current attempt when it made none. An invalid submission followed by a stop
+ * is one attempt, not two.
+ */
+export function attemptsUsed(state: SubmitState): number {
+  return state.failures + (state.missed ?? 0) + (currentAttemptMissed(state) ? 1 : 0)
+}
+
+/** The text that asks a schema agent for its submission again (runner re-prompt and X23 nudge). */
+export function retryPrompt(state: SubmitState): string {
+  return (
+    (state.lastError && !currentAttemptMissed(state)
+      ? `Your ${SUBMIT_TOOL_NAME} output failed schema validation:\n${state.lastError}\n\n`
+      : `You did not call the \`${SUBMIT_TOOL_NAME}\` tool with a valid result.\n\n`) +
+    `Call \`${SUBMIT_TOOL_NAME}\` now with the \`output\` argument matching the schema from your instructions. ` +
+    "Do not redo the work: submit the result you already have."
+  )
 }
 
 export type SubmitResult =
@@ -39,44 +75,80 @@ export interface StorageLike {
 export interface SubmitRegistry {
   register(sessionID: string, schema: Schema): Promise<void>
   unregister(sessionID: string): Promise<void>
-  /** Current state (memory, refreshed from storage). undefined when not registered. */
-  read(sessionID: string): Promise<SubmitState | undefined>
+  /**
+   * Current state (memory, refreshed from storage). undefined when not registered. With `stored`,
+   * only a state present in storage counts: another instance (the runner's) may have unregistered
+   * the session, which this instance's memory copy does not know.
+   */
+  read(sessionID: string, opts?: { stored?: boolean }): Promise<SubmitState | undefined>
   submit(sessionID: string, output: unknown): Promise<SubmitResult>
+  /**
+   * A new prompt or nudge asks for the submission again: the attempt that just ended counts as
+   * missed when it made no submission, and the next one starts. undefined when not registered.
+   */
+  nextAttempt(sessionID: string, by: "prompt" | "nudge"): Promise<SubmitState | undefined>
 }
 
 function isState(v: unknown): v is SubmitState {
   return typeof v === "object" && v !== null && typeof (v as SubmitState).schema === "object"
 }
 
-/** Prefer whichever copy has progressed further (accepted beats not; more failures beats fewer). */
-function newer(a: SubmitState | undefined, b: SubmitState | undefined): SubmitState | undefined {
-  if (!a) return b
-  if (!b) return a
-  if (!!a.accepted !== !!b.accepted) return a.accepted ? a : b
-  return b.failures > a.failures ? b : a
+/**
+ * Prefer whichever copy has progressed further: accepted beats not, else the higher `rev` (every
+ * save bumps it, so a nudge another instance recorded without a new failure is not dropped). On a
+ * tie the stored copy wins: two saves from the same base rev, and storage holds the later one.
+ */
+function newer(local: SubmitState | undefined, stored: SubmitState | undefined): SubmitState | undefined {
+  if (!local) return stored
+  if (!stored) return local
+  if (!!local.accepted !== !!stored.accepted) return local.accepted ? local : stored
+  return (stored.rev ?? 0) >= (local.rev ?? 0) ? stored : local
 }
 
 export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
   const mem = new Map<string, SubmitState>()
+  /** Sessions this instance registered: its memory copy stays valid until it unregisters them. */
+  const owned = new Set<string>()
+  /** Per-session queue: one read-modify-write (submit, nextAttempt) at a time in this instance. */
+  const queues = new Map<string, Promise<unknown>>()
   const key = (id: string) => SUBMIT_STORAGE_PREFIX + id
+
+  function serialized<T>(sessionID: string, fn: () => Promise<T>): Promise<T> {
+    const run = (queues.get(sessionID) ?? Promise.resolve()).then(fn, fn)
+    const tail = run.catch(() => {})
+    queues.set(sessionID, tail)
+    void tail.then(() => {
+      if (queues.get(sessionID) === tail) queues.delete(sessionID)
+    })
+    return run
+  }
 
   async function load(sessionID: string): Promise<SubmitState | undefined> {
     const local = mem.get(sessionID)
     let stored: SubmitState | undefined
+    let readable = false
     if (storage) {
       try {
         const v = await storage.get(key(sessionID))
+        readable = true
         if (isState(v)) stored = v
       } catch {
         // storage unavailable: memory only
       }
+    }
+    // A session another instance registered that is gone from storage was unregistered there: a
+    // stale memory copy here must not revive it (nor be written back).
+    if (readable && !stored && !owned.has(sessionID)) {
+      mem.delete(sessionID)
+      return undefined
     }
     const best = newer(local, stored)
     if (best) mem.set(sessionID, best)
     return best
   }
 
-  async function save(sessionID: string, state: SubmitState) {
+  async function save(sessionID: string, next: SubmitState) {
+    const state = { ...next, rev: (next.rev ?? 0) + 1 }
     mem.set(sessionID, state)
     if (storage) {
       try {
@@ -89,9 +161,11 @@ export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
 
   return {
     async register(sessionID, schema) {
-      await save(sessionID, { schema, failures: 0 })
+      owned.add(sessionID)
+      await serialized(sessionID, () => save(sessionID, { schema, failures: 0, missed: 0, mark: 0, nudges: 0 }))
     },
     async unregister(sessionID) {
+      owned.delete(sessionID)
       mem.delete(sessionID)
       if (storage) {
         try {
@@ -105,19 +179,32 @@ export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
       const s = await load(sessionID)
       return s ? structuredClone(s) : undefined
     },
-    async submit(sessionID, output) {
-      const state = await load(sessionID)
-      if (!state) return { status: "unknown_session" }
-      if (state.accepted) return { status: "already_accepted" }
-      const result = validateOutput(state.schema, output)
-      if (result.ok) {
-        await save(sessionID, { ...state, accepted: { value: output } })
-        return { status: "accepted", value: output }
-      }
-      const failures = state.failures + 1
-      await save(sessionID, { ...state, failures, lastError: result.error })
-      return { status: "invalid", error: result.error, failures, exhausted: failures >= maxStructuredRetries() }
-    },
+    submit: (sessionID, output) =>
+      serialized(sessionID, async (): Promise<SubmitResult> => {
+        const state = await load(sessionID)
+        if (!state) return { status: "unknown_session" }
+        if (state.accepted) return { status: "already_accepted" }
+        const result = validateOutput(state.schema, output)
+        if (result.ok) {
+          await save(sessionID, { ...state, accepted: { value: output } })
+          return { status: "accepted", value: output }
+        }
+        const failures = state.failures + 1
+        await save(sessionID, { ...state, failures, lastError: result.error })
+        return { status: "invalid", error: result.error, failures, exhausted: failures + (state.missed ?? 0) >= maxStructuredRetries() }
+      }),
+    nextAttempt: (sessionID, by) =>
+      serialized(sessionID, async () => {
+        const state = await load(sessionID)
+        if (!state) return undefined
+        await save(sessionID, {
+          ...state,
+          missed: (state.missed ?? 0) + (currentAttemptMissed(state) ? 1 : 0),
+          mark: state.failures,
+          nudges: (state.nudges ?? 0) + (by === "nudge" ? 1 : 0),
+        })
+        return structuredClone(mem.get(sessionID)!)
+      }),
   }
 }
 

@@ -1,9 +1,94 @@
-# opencode 2.0.15 plugin API: verified facts for the workflow runner
+# opencode plugin API: verified facts for the workflow runner
 
-Everything below was observed live on opencode **2.0.15** (`npx opencode2 run --standalone`) using
+The sections after the first were observed live on opencode **2.0.15** (`npx opencode2 run --standalone`) using
 the throwaway plugins in `tests/e2e/spikes/` (`explore.js`, `runner-live.ts`), unless it is marked
 *(source)*, which means it was read from the v2 branch of `anomalyco/opencode` (`packages/core/src`).
-The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes.
+The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes. The first section lists what
+changed in **2.3.0** (the current pin).
+
+## Changes in 2.3.0 *(source; not yet re-verified live)*
+
+Read from the `v2.0.15..v2.3.0` tags of `anomalyco/opencode`; the unit and parity suites pass against
+the 2.3.0 packages and `tsc` is clean against their types.
+
+- **Every `ctx.*` call the plugin makes keeps its 2.0.15 shape** (session, tool, permission, agent,
+  model, worktree, storage, rpc, event, command). Type-only changes: `session.wait` moved to
+  `ExperimentalSessionApi` (still on `ctx.session`; the client marks the old path "removed in the
+  next minor"), `interrupt` now types `resume`, `event.subscribe` takes `{types?, signal?, onActivity?}`
+  (#58864), `model.list` returns chat models only by default.
+- **Dependencies:** `@opencode/plugin` and `@opencode/codemode` 2.3.0 depend on `effect` 4.1.0;
+  codemode 2.3.0 with an older `effect` crashes every run (`fiber.succeedWith is not a function`).
+  TUI plugins need OpenTUI 0.8 (`@opentui/*` >= 0.8.4 peer; older pins fail to install).
+- **codemode** replaced its interpreter with a bytecode VM (#62642, #63377; 5–90× faster). It adds
+  `this`, `bind`/`call`/`apply`, `Object.freeze`/`create`, `structuredClone`, `WeakMap`/`WeakSet`, and
+  a global **`require(name)` / `import(name)` that return native globals** (#61151): `require("Math")`
+  is the native Math, which bypassed the P15 guards until the sandbox hid `require` and rejected
+  `import()`. Host functions still cannot receive functions. A global may return an Effect, which
+  codemode interrupts on timeout/abort (#59948).
+- **`session.create({parentID})`** is forwarded (#52359), but `parentID` and `location` are
+  mutually exclusive (a child is forced into its parent's location), and every `parentID` child
+  posts a `<subagent>` report with its last reply into the parent's inbox (steer) after **every**
+  completed round and wakes the parent (#63209; the opt-out was removed in #63413). The runner
+  therefore keeps creating root sessions (and P63 stays). Upstream's own `subagent` tool is now
+  always background (#63391): the call returns at once with the child's sessionID, the caller's
+  turn may end, and the job's `<subagent>` report wakes the caller later
+  (`core/tool/plugin/subagent.ts`). `session.wait()` is `awaitIdle` over executions only
+  (`core/session/run-coordinator.ts`), so it resolves while the job runs; the job is visible to a
+  plugin only in the `experimental.idle` event's `background` list. A workflow child that uses the
+  tool would be read too early: the runner waits for such jobs through the idle hook (X31).
+- **Failure text:** the `{type:"idle", outcome:"failed"}` context message carries
+  `error: {type, message, status?}` (#53826). An interrupted step keeps its closed text and its
+  assistant message gets `error: {type:"aborted", message:"Step interrupted"}` (#60674). Tokens of an
+  interrupted step are still not counted. The runner reports the idle marker's error and skips
+  aborted messages when it reads a result or an error (P23).
+- **`experimental.idle` session hook:** runs when a session finishes model work with nothing pending,
+  before it goes idle; input admitted from it (e.g. `synthetic`) continues the same execution
+  (`core/session/runner/llm.ts`; `/goal` uses it). On 2.0.15 registering the name succeeds and never fires.
+  Details: hooks are per Location (the instance of the session's directory runs them), run in
+  sequence and are awaited; a rejected callback is a defect that fails the execution. After the
+  hooks, `SessionInbox.has(…, "input")` counts any pending steer or queued item, `resume:false`
+  included, so a steer admitted up to that check continues the execution. The event's
+  `background` lists running shells/subagents/images with the owning `sessionID`. It does not run
+  after an interrupted or failed execution. The plugin uses it for X22/X23 ("Inbox and steering").
+- **Location eviction:** `LocationActivity` no longer evicts a location with an active execution or
+  background job (#57416); `experimental.location_idle_timeout` overrides the 60-minute timeout.
+- **`ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})`** asks
+  through the native prompt and honours saved approvals (#54930). Evaluation order is unchanged:
+  configured deny (agent rules, then session rules; an unknown agent denies everything), then saved
+  approvals, then the `permission.evaluate` hooks (they see `metadata`). A deny, a hook's deny or a
+  rejection with feedback rejects with a `Tool.Error` (`_tag: "Tool.Error"`, `message`); a plain
+  rejection rejects with the `Permission.DeclinedError` defect (`_tag: "Permission.DeclinedError"`),
+  which a tool must rethrow so the step ends. `source: {type:"tool", messageID, id}` ties the prompt
+  to a tool call. There is no abort signal: the adapter runs it in its own fiber, and core drops a
+  pending prompt only when that fiber ends, so a prompt stays until answered even after the tool call
+  is cancelled. `permission.list({sessionID})` lists the session's pending requests (`{id, action,
+  resources, source?, metadata?, …}`) and `permission.reply({sessionID, requestID, decision:
+  "once"|"always"|"reject", message?})` answers one; a `reject` also rejects every other pending
+  request of that session. P76 uses assert, and list + reply to withdraw a prompt nobody waits on.
+- **Session `context` hook** (`ctx.session.hook("context", cb)`): runs before each primary model
+  request with `{sessionID, agent, model: {providerID, id, variant?}, system, messages, options,
+  tools: {[name]: {description, input}}}` (a copy); deleting a `tools` key drops that tool from the
+  request (core/src/session/model-request.ts). X24 uses it with `ctx.model.list()`'s
+  `capabilities.freeform`, the field core checks before it sends a tool's freeform encoding.
+- **`ctx.vcs.status` still ignores the location**; keep the git shell-out.
+- **Freeform tool input** (#61703): `freeform: {type:"text"}` on a tool whose input schema has exactly
+  one property (a required string) lets models whose models.dev capabilities list it send raw text.
+- **Plugin resolution:** a local directory whose `package.json` has `name` and `exports` resolves
+  through them like the published package (#55246), so a checkout must be built; `rpc.call` no
+  longer waits for plugins to load (#62796), so a TUI's first call can fail with `rpc.unavailable`.
+- **TUI:** keymap layers can be registered at setup (#53010); `dialog.select` takes `search` and
+  footer `actions` (#53009); a `sidebar.content` slot `{sessionID}`; a slot rendering a bare string
+  throws. OpenTUI 0.8 still JSX-compiles only files outside `node_modules`, so `dist/tui.js` stays
+  precompiled. GUI (desktop/web app) plugins are new and experimental (`./gui-experimental` export).
+- **GUI entry resolution:** `Host.resolve(...).gui` is the package's `./gui-experimental` export (or
+  `gui-experimental.cjs`/`.js` at the root of a directory without `exports`), and only a `.cjs`/`.js`
+  file counts: the app evaluates it as CommonJS text (`new Function("require", "module", "exports",
+  code)`) in each window and in its main process (window-only modules such as `solid-js` are inert
+  placeholders there). Its default export must be `Plugin.define({ os?, i18n?, stores?, setup?, main? })`
+  with a setup; it may require only the modules the preset lists (`@opencode/plugin/gui/vite`). The
+  app's main process lists the plugins of its own server only; a window `setup` is synchronous, and
+  `ctx.client` is that server's client, so calls for a session go through `ctx.servers.get(id).client`.
+  RPC `events.on` does not reconnect after its stream ends.
 
 ## Session API (`ctx.session`)
 
@@ -54,7 +139,8 @@ The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes.
   within milliseconds and `get().outcome` is `"failed"`. `context()` contains **only**
   `[user, {type:"idle", outcome:"failed"}]`, with no assistant message and no error text. When an
   assistant message does exist, `error: {type, message, status?}` is set on it *(types)*. The
-  runner reports that message, or a generic "agent session failed (terminal error)".
+  runner reports that message, or a generic "agent session failed (terminal error)". (2.3.0: the
+  failed idle marker carries the error itself, and the runner reports it first.)
 
 ## Inbox and steering (X01–X08)
 
@@ -108,6 +194,24 @@ reported `undelivered` and stays parked: no turn ever runs after the result was 
 Messages for an agent that has no session yet are appended to its first prompt instead. (Before
 0.2, messages went out with `resume:true`, which could start a successor turn after the runner
 had given up verifying: that turn ran unread and its tokens were never counted.)
+
+**opencode 2.3+: the `experimental.idle` hook** *(source; not yet live-verified)* closes most of
+that race inside the execution (`src/opencode/idle.ts`, X22/X23). The plugin instance registers it
+at setup (unless `OPENCODE_WORKFLOW_IDLE_HOOK=0`) and keeps a map of its live children (session id
+→ mailbox, schema, stopping). When a child is about to go idle the hook stops its mailbox
+(`finishing`), awaits sends in flight, and returns with the window reopened when a sent message is
+not in `context()` yet: it waits in the inbox, so opencode continues the same execution with it.
+A later message is refused `finishing` rather than parked; if the execution goes on anyway (another
+plugin's idle hook, a user prompt, the cap), the session `context` hook, which runs before every
+model request, reopens the window the hook closed. While the child's own subagent or image job
+runs, the hook only records it (`workflow-jobs/<sessionID>` in `ctx.storage`) and the runner keeps
+waiting after `wait()` until a report lists none (X31). For a schema agent without an accepted
+submission it then sends the re-prompt text as a `resume:false` steer (a nudge, counted in the P21
+budget through the submit registry). The verification and wake above stay as the fallback for
+2.0.15, worktree children (their hook runs in the worktree instance, which has no mailbox; it can
+still nudge through the shared storage), a hook that hit its 3 s cap, and interrupted or failed
+turns. The plugin does not subscribe to `session.inbox.delivered` instead of checking
+`context()`: the check is still needed for the fallback paths, and one mechanism is simpler.
 
 ## RPC, events and TUI plugins (X11–X16)
 
@@ -302,8 +406,9 @@ submit), and `retry` all behaved as specified.
 
 - A config entry `"plugins": ["file:///<dir>"]` (or a plain directory path, or
   `{"package": "file:///<dir>", "options": {...}}`) is resolved by `Host.resolve({directory})`
-  (`@opencode/plugin/dist/host.js`), which tries `<dir>/server` then `<dir>/index` and **ignores
-  package.json `main`/`exports`** *(source)*. Hence the repo's root `server.ts`. **Verified live**
+  (`@opencode/plugin/dist/host.js`). On 2.0.15 it tried `<dir>/server` then `<dir>/index` and
+  **ignored package.json `main`/`exports`** *(source)*, hence the root `server.ts` of 0.2.x; since
+  2.3.0 it follows `exports` (see the first section), so the checkout must be built. **Verified live** on 2.0.15
   (`.sandbox/review/probe-install2.ts`, `opencode serve`): both directory forms load the plugin, and
   `options: {disabled: true}` reaches `setup` (plugin active, no workflow commands).
 - A file target (`.../src/index.ts`) is rejected with `configured plugin path must be a directory`;

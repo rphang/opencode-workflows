@@ -1,5 +1,6 @@
-// Extensions beyond Claude Code (docs/PARITY.md "Extensions", X01–X09): steering a running agent,
-// through the plugin's workflow_control tool and /workflows msg command.
+// Extensions beyond Claude Code (docs/PARITY.md "Extensions", X01–X09, X22–X23): steering a running agent,
+// through the plugin's workflow_control tool and /workflows msg command, and the opencode 2.3+
+// `experimental.idle` hook (late messages and schema nudges in the same execution).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
@@ -222,6 +223,7 @@ describe("X03 end-of-turn race", () => {
         p = await h.setup({
           real: true,
           fake: {
+            idleHookFires: false, // the fallback path (2.0.15, or a message after the idle check)
             successorDelayMs: 20,
             respond: ({ successor }) =>
               successor
@@ -506,5 +508,125 @@ describe("X09 framing", () => {
     await p.settled(out.runId!)
     expect((await h.store.readAgentRecord(out.runId!, 0))?.key).toBe(agentKey("task A", { label: "l" }))
     expect(SESSION).toMatch(/^ses_/)
+  })
+})
+
+describe("X22 idle-hook steering flush (opencode 2.3+)", () => {
+  test("X22 real runner: a message sent while the agent ends its turn is read in the same execution, without a wake", async () => {
+    const replies: string[] = []
+    let runId = ""
+    let p!: Plugged
+    p = await h.setup({
+      real: true,
+      fake: {
+        respond: ({ continuation }) =>
+          continuation
+            ? { text: "REPLY TO MESSAGE" }
+            : {
+                text: "first answer",
+                beforeIdleHook: () =>
+                  void p.control({ action: "message", runId, agentIndex: 0, text: "one more thing" }).then((r) => replies.push(r)),
+              },
+      },
+    })
+    // The send is still in flight when the hook runs: the hook waits for it.
+    const orig = p.fake.ctx.session.synthetic
+    p.fake.ctx.session.synthetic = (async (input: any) => {
+      await sleep(30)
+      return orig(input)
+    }) as typeof orig
+    const out = await p.call({ script: script(`return await agent("task")`) })
+    runId = out.runId!
+    expect(p.resultOf(await p.notification(0))).toBe("REPLY TO MESSAGE")
+    expect(replies[0]).toMatch(/sent/)
+    const child = p.fake.children()[0]!
+    expect(child.messages.filter((m) => m.type === "idle")).toHaveLength(1)
+    expect(p.fake.calls.interrupt).toHaveLength(0)
+    await p.settled(runId)
+    const rec = await h.store.readAgentRecord(runId, 0)
+    expect(rec?.messages?.[0]?.status).toBe("delivered")
+    expect(rec?.warnings ?? []).toEqual([])
+  })
+
+  test("X22 the hook is registered when ctx.session.hook exists, disposed with the plugin, and OPENCODE_WORKFLOW_IDLE_HOOK=0 turns it off", async () => {
+    // Other session hooks (X24's "context" filter) may be registered too; count only ours.
+    const idle = (p: { fake: { sessionHooks: { name: string }[] } }) => p.fake.sessionHooks.filter((x) => x.name === "experimental.idle")
+    const on = await h.setup({ real: true })
+    expect(idle(on)).toHaveLength(1)
+    await on.cleanup?.()
+    expect(on.fake.sessionHooks).toHaveLength(0)
+    const off = await h.setup({ real: true, env: { OPENCODE_WORKFLOW_IDLE_HOOK: "0" } })
+    expect(idle(off)).toHaveLength(0)
+    // No session hooks at all (an older host): setup still works and runs agents.
+    const old = await h.setup({ real: true, fake: { noSessionHook: true, respond: () => ({ text: "fine" }) } })
+    await old.call({ script: script(`return await agent("x")`) })
+    expect(old.resultOf(await old.notification(0))).toBe("fine")
+  })
+})
+
+describe("X23 idle-hook schema nudge (opencode 2.3+)", () => {
+  const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
+  const nudgesOf = (p: Plugged) => p.fake.calls.synthetic.filter((s) => s.metadata?.workflowNudge !== undefined)
+
+  test("X23 real runner: a schema agent that stops without workflow_submit is nudged in the same execution", async () => {
+    const p = await h.setup({
+      real: true,
+      fake: { respond: ({ continuation }) => (continuation ? { submit: [{ answer: "42" }] } : { text: "The answer is 42." }) },
+    })
+    await p.call({ script: script(`return await agent("compute", { schema: ${JSON.stringify(schema)} })`) })
+    expect(p.resultOf(await p.notification(0))).toEqual({ answer: "42" })
+    expect(p.fake.calls.prompt).toHaveLength(1)
+    const nudges = nudgesOf(p)
+    expect(nudges).toHaveLength(1)
+    expect(nudges[0]).toMatchObject({ delivery: "steer", resume: false, metadata: { workflowNudge: 1 } })
+    expect(p.fake.children()[0]!.messages.filter((m) => m.type === "idle")).toHaveLength(1)
+  })
+
+  test("X23 P21 nudges count against MAX_STRUCTURED_OUTPUT_RETRIES; with the hook off the runner re-prompts in new turns", async () => {
+    const prev = process.env.MAX_STRUCTURED_OUTPUT_RETRIES
+    process.env.MAX_STRUCTURED_OUTPUT_RETRIES = "3"
+    try {
+      const src = script(`try { await agent("compute", { schema: ${JSON.stringify(schema)} }); return "no throw" } catch (e) { return e.message }`)
+      const hooked = await h.setup({ real: true, fake: { respond: () => ({ text: "never submits" }) } })
+      await hooked.call({ script: src })
+      expect(String(hooked.resultOf(await hooked.notification(0)))).toMatch(/after 3 attempts/)
+      expect(hooked.fake.calls.prompt).toHaveLength(1)
+      expect(nudgesOf(hooked)).toHaveLength(2)
+
+      const plain = await h.setup({ real: true, env: { OPENCODE_WORKFLOW_IDLE_HOOK: "0" }, fake: { respond: () => ({ text: "never submits" }) } })
+      await plain.call({ script: src })
+      expect(String(plain.resultOf(await plain.notification(0)))).toMatch(/after 3 attempts/)
+      expect(plain.fake.calls.prompt).toHaveLength(3)
+      expect(nudgesOf(plain)).toHaveLength(0)
+    } finally {
+      if (prev === undefined) delete process.env.MAX_STRUCTURED_OUTPUT_RETRIES
+      else process.env.MAX_STRUCTURED_OUTPUT_RETRIES = prev
+    }
+  })
+})
+
+describe("X31 background jobs (opencode 2.3+)", () => {
+  test("X31 real runner: agent() resolves to the reply after the agent's background subagent reported, not to 'I launched a subagent'", async () => {
+    let p!: Plugged
+    p = await h.setup({
+      real: true,
+      fake: {
+        respond: ({ turn, session, successor }) => {
+          if (turn === 0) {
+            const job = p.fake.startBackground(session.info.id, { description: "scan the repo" })
+            setTimeout(() => void p.fake.finishBackground(session.info.id, job, "<subagent>3 files</subagent>"), 40)
+            return { text: "I launched a subagent; I will report when it is done." }
+          }
+          return successor ? { text: "The repo has 3 relevant files." } : { text: "unexpected" }
+        },
+      },
+    })
+    const out = await p.call({ script: script(`return await agent("count the relevant files")`) })
+    expect(p.resultOf(await p.notification(0))).toBe("The repo has 3 relevant files.")
+    expect(p.fake.calls.prompt).toHaveLength(1)
+    await p.settled(out.runId!)
+    const rec = await h.store.readAgentRecord(out.runId!, 0)
+    expect(rec?.warnings ?? []).toEqual([])
+    expect([...p.fake.storage.keys()].filter((k) => k.startsWith("workflow-jobs/"))).toEqual([])
   })
 })

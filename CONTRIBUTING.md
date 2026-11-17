@@ -62,7 +62,7 @@ This project uses TDD. For every change:
 | e2e harness (offline) | `npx bun test tests/e2e/harness.test.ts` | free | always |
 | Live e2e | `OPENCODE_E2E=1 npx bun test tests/e2e --timeout 600000` | about $0.20 and 2 minutes per full run | opt-in |
 
-The live e2e suite drives the real opencode 2.0.15 CLI with real model calls. It needs
+The live e2e suite drives the real opencode CLI (the pinned `@opencode/cli` devDependency) with real model calls. It needs
 `OPENAI_API_KEY`. Without `OPENCODE_E2E=1`, the live tests are skipped. The harness isolates every
 opencode process under `.sandbox/` (its own `XDG_*` dirs), so your real opencode data is never
 used. Details, costs and flakiness notes are in [`docs/E2E.md`](docs/E2E.md).
@@ -85,7 +85,7 @@ DEGRADED and N/A items are also summarized in the README's Limitations section.
 ## Testing against a new opencode version
 
 The plugin is pinned to one opencode release: `@opencode/plugin`, `@opencode/codemode` and
-`@opencode/cli` are all 2.0.15, and so is `engines.opencode`. Dependabot deliberately ignores
+`@opencode/cli` are all 2.3.0, and so is `engines.opencode`. Dependabot deliberately ignores
 `@opencode/*` and `effect` (which must stay the exact version `@opencode/codemode` depends on), because
 the plugin API is young and each bump must be verified by hand:
 

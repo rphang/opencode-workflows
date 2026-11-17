@@ -4,6 +4,10 @@
 //                   @opencode/codemode instead of being duplicated)
 //   dist/tui.js     the TUI companion (live progress tree), precompiled Solid JSX with every
 //                   host-provided module external (scripts/build-tui.ts)
+//   dist/gui-experimental.cjs
+//                   the desktop app companion (pill, side panel tree, finish notice): one CommonJS
+//                   file built with opencode's Vite preset, app-provided modules external
+//                   (scripts/build-gui.ts)
 //   dist/*.d.ts     type declarations emitted by tsc from tsconfig.build.json
 //
 // The bundle targets Node-compatible ESM (node: builtins only, no Bun APIs), so it loads both in
@@ -16,6 +20,7 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import { buildGui } from "./build-gui.ts"
 import { buildTui } from "./build-tui.ts"
 
 const root = path.resolve(import.meta.dir, "..")
@@ -41,6 +46,8 @@ for (const output of result.outputs) console.log(`built ${path.relative(root, ou
 try {
   const tui = await buildTui(dist)
   console.log(`built ${path.relative(root, tui)}`)
+  const gui = await buildGui(path.join(dist, "gui-experimental.cjs"))
+  console.log(`built ${path.relative(root, gui)}`)
 } catch (e) {
   console.error(e instanceof Error ? e.message : e)
   process.exit(1)

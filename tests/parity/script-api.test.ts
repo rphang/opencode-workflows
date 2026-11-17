@@ -38,6 +38,13 @@ async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Pr
 
 const FILES_SCHEMA = `{ type: "object", required: ["files"], properties: { files: { type: "array", items: { type: "string" } } } }`
 
+/**
+ * Requests for another attempt: runner prompts plus, on opencode 2.3+, X23 idle-hook nudges sent in
+ * the same execution. Their total is the P21 attempt count either way.
+ */
+const askedTimes = (p: { fake: { calls: { prompt: unknown[]; synthetic: any[] } } }) =>
+  p.fake.calls.prompt.length + p.fake.calls.synthetic.filter((s) => s.metadata?.workflowNudge !== undefined).length
+
 describe("P20 agent()", () => {
   test("P20 agent(prompt) without a schema resolves to the subagent's final text", async () => {
     const p = await h.setup({ real: true, fake: { respond: ({ text }) => ({ text: `answer to: ${text}` }) } })
@@ -79,7 +86,7 @@ describe("P21 structured output", () => {
       const r = String(p.resultOf(await p.notification(0)))
       expect(r).toMatch(/^threw: structured output failed validation after 5 attempts/)
       expect(r).toMatch(/files/) // the last validation failure names the bad field
-      expect(p.fake.calls.prompt.length).toBe(5)
+      expect(askedTimes(p)).toBe(5)
     })
   })
 
@@ -88,7 +95,7 @@ describe("P21 structured output", () => {
       const p = await h.setup({ real: true, fake: { respond: () => ({ submit: [{ files: 42 }], text: "bad" }) } })
       await p.call({ script: script(`try { await agent("list", { schema: ${FILES_SCHEMA} }) } catch (e) { return e.message }`) })
       expect(String(p.resultOf(await p.notification(0)))).toMatch(/after 2 attempts/)
-      expect(p.fake.calls.prompt.length).toBe(2)
+      expect(askedTimes(p)).toBe(2)
     })
   })
 
