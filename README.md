@@ -103,6 +103,8 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 - **Live progress tree (extension, TUI).** `ctrl+x o` opens a live tree of the session's runs:
   phases with their model labels, every agent with its status, the model it runs on, tokens,
   elapsed time and what it is doing right now. Enter opens an agent's session, `x` stops, `p` pauses, `m` messages it.
+  In the desktop app (experimental), a composer pill and a side panel show the same tree
+  ([Desktop app](#desktop-app-experimental)).
 - **The model each agent really ran on (extension).** Every agent records its actual model as
   `provider/model#variant` (from the script's `model`, else the parent session's model, plus the
   `effort` variant). It is shown in the tree, in `/workflows <runId>` and `workflow_control` status,
@@ -443,6 +445,34 @@ curl -u opencode:$OPENCODE_PASSWORD -H "content-type: application/json" \
   -H "x-opencode-directory: <url-encoded project path>" \
   -d '{"input":{"all":true}}' http://127.0.0.1:<port>/api/rpc/dynamic-workflows/list
 ```
+
+### Desktop app (experimental)
+
+opencode's desktop app (2.3) can load a plugin's GUI part, and this plugin ships one
+(`dist/gui-experimental.cjs`, the `./gui-experimental` export). opencode marks this plugin API as
+experimental, and this part has not been checked in a real desktop app yet.
+
+- **Composer pill.** While a run of the session is active, a pill above the composer shows
+  `wf <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). It turns orange when a
+  run is paused or has warnings, and red when a run has an error or a failed agent. Click it for one
+  row per active run; a row opens the tree on that run.
+- **Tree panel.** "Workflows: toggle the live progress tree" in the command palette (or `/wf`, or the
+  side panel's `+` menu) opens the tree in the side panel. It shows the same runs, phases and agents as
+  the TUI tree, with buttons on each row: fold, open the agent's (or the run's) session in a tab,
+  pause/resume the run, stop (after a confirmation), message and urgent message (see
+  [Steering](#steering-a-running-agent)). A switch at the top shows every run of the project instead
+  of this session's.
+- **Notifications.** When a run of a session open in a tab finishes, the app sends a system
+  notification under your Agent (or, for a failed run, Errors) notification settings. Clicking it
+  opens the session. If none was shown (for example because the app has focus), you get a toast.
+- From a workflow agent's own tab, the pill and the tree show the parent's run.
+
+The app loads the GUI part for the plugins of its own server: list the plugin in `plugins` in
+`opencode.json(c)` and install it from npm or a built directory (see
+[Install](docs/INSTALL.md#the-desktop-app-part-experimental)); a single-file loader has no GUI part.
+The GUI then talks to the server plugin through its `dynamic-workflows` RPC on each session's own
+server. If a server runs no copy of the plugin (or an older one), the pill stays hidden there and the
+panel says the workflows are not available.
 
 ### Saved workflows
 

@@ -63,6 +63,15 @@ the 2.3.0 packages and `tsc` is clean against their types.
   footer `actions` (#53009); a `sidebar.content` slot `{sessionID}`; a slot rendering a bare string
   throws. OpenTUI 0.8 still JSX-compiles only files outside `node_modules`, so `dist/tui.js` stays
   precompiled. GUI (desktop/web app) plugins are new and experimental (`./gui-experimental` export).
+- **GUI entry resolution:** `Host.resolve(...).gui` is the package's `./gui-experimental` export (or
+  `gui-experimental.cjs`/`.js` at the root of a directory without `exports`), and only a `.cjs`/`.js`
+  file counts: the app evaluates it as CommonJS text (`new Function("require", "module", "exports",
+  code)`) in each window and in its main process (window-only modules such as `solid-js` are inert
+  placeholders there). Its default export must be `Plugin.define({ os?, i18n?, stores?, setup?, main? })`
+  with a setup; it may require only the modules the preset lists (`@opencode/plugin/gui/vite`). The
+  app's main process lists the plugins of its own server only; a window `setup` is synchronous, and
+  `ctx.client` is that server's client, so calls for a session go through `ctx.servers.get(id).client`.
+  RPC `events.on` does not reconnect after its stream ends.
 
 ## Session API (`ctx.session`)
 

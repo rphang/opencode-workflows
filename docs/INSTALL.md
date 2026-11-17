@@ -200,3 +200,19 @@ or `<directory>/tui`), and the TUI loads it for every active server plugin that 
 
 `dist/tui.js` imports `solid-js`, `@opentui/*` and `@opencode/plugin/tui` without bundling them: the
 TUI provides its own copies at runtime, so the package has no new dependencies.
+
+### The desktop app part (experimental)
+
+The desktop app resolves a plugin's GUI entry the same way (`Host.resolve` → `gui`: the
+`./gui-experimental` export, or `gui-experimental.cjs` at the root of a directory without `exports`),
+and loads it for every plugin listed in `plugins`. opencode marks this plugin API as experimental:
+
+| Install | GUI entry | Pill, tree panel, finish notice |
+|---|---|---|
+| npm package (`plugins` entry or `opencode plugin add`) | `exports["./gui-experimental"]` → `dist/gui-experimental.cjs`, one CommonJS file | yes (not live-verified) |
+| Directory entry (`file:///…/opencode-workflows`) | the same export (build first) | yes (not live-verified) |
+| Loader file (`plugins/workflows.js`) | none | no |
+
+`dist/gui-experimental.cjs` is built with opencode's Vite preset (`@opencode/plugin/gui/vite`) and
+requires only modules the app provides (`solid-js`, `solid-js/web`, `@opencode/plugin/gui`); the
+shared client logic is bundled in.
