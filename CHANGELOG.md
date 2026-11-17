@@ -8,6 +8,8 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-18
+
 ### Fixed
 
 - Desktop app tree panel: a declared phase whose agents have not started (`0/0`) showed ✓; it now
@@ -28,6 +30,7 @@ may contain breaking changes.
   a finished run), taken in the macOS desktop app 2.3.0. The pill and the tree panel are now
   live-verified there (PARITY X28, X29); the finish notice (X30) is not. `docs/E2E.md` describes the
   desktop capture recipe.
+- README: the desktop tree panel and the TUI tree side by side right under the install command.
 
 ## [0.3.0] - 2026-11-17
 
@@ -290,7 +293,8 @@ Compared with Claude Code (details and status per item in `docs/PARITY.md`):
   `opencode serve`. After a hard crash, suspended child sessions and `wf-<runId>-<i>` worktrees are
   not cleaned up automatically.
 
-[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/rphang/opencode-workflows/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rphang/opencode-workflows/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rphang/opencode-workflows/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rphang/opencode-workflows/releases/tag/v0.1.0
