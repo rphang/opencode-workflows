@@ -508,6 +508,7 @@ Set them in the environment of the opencode server. They work with every install
 | `MAX_STRUCTURED_OUTPUT_RETRIES` (or `OPENCODE_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES`) | `5` | Attempts a schema agent gets before `agent()` throws. |
 | `OPENCODE_WORKFLOW_FREEFORM` | unset (on) | `0`, `false`, `no` or `off` registers no `workflow_script` tool, like the `freeformTool: false` option. |
 | `OPENCODE_WORKFLOW_RPC_CONTROL` | unset (on) | `0`, `false`, `no` or `off` makes the live tree's RPC read-only, like the `rpcControl: false` option. |
+| `OPENCODE_WORKFLOW_IDLE_HOOK` | unset (on) | `0`, `false`, `no` or `off` registers no `experimental.idle` hook (opencode 2.3+). Without it, a steering message that lands as an agent finishes still reaches it through an extra turn, and a schema agent that forgot `workflow_submit` is re-prompted in a new turn instead of nudged in the same one. |
 | `OPENCODE_WORKFLOW_DATA_DIR` | `$XDG_DATA_HOME/opencode/workflows`, else `%LOCALAPPDATA%\opencode\workflows` (Windows) or `~/.local/share/opencode/workflows` | Run transcripts, stored as `<dir>/<sessionID>/<runId>/`. The `dataDir` plugin option wins over it. |
 
 ## How it compares to Claude Code

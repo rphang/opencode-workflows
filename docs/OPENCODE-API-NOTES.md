@@ -34,10 +34,17 @@ the 2.3.0 packages and `tsc` is clean against their types.
 - **Failure text:** the `{type:"idle", outcome:"failed"}` context message carries
   `error: {type, message, status?}` (#53826). An interrupted step keeps its closed text and its
   assistant message gets `error: {type:"aborted", message:"Step interrupted"}` (#60674). Tokens of an
-  interrupted step are still not counted.
+  interrupted step are still not counted. The runner reports the idle marker's error and skips
+  aborted messages when it reads a result or an error (P23).
 - **`experimental.idle` session hook:** runs when a session finishes model work with nothing pending,
   before it goes idle; input admitted from it (e.g. `synthetic`) continues the same execution
   (`core/session/runner/llm.ts`; `/goal` uses it). On 2.0.15 registering the name succeeds and never fires.
+  Details: hooks are per Location (the instance of the session's directory runs them), run in
+  sequence and are awaited; a rejected callback is a defect that fails the execution. After the
+  hooks, `SessionInbox.has(…, "input")` counts any pending steer or queued item, `resume:false`
+  included, so a steer admitted up to that check continues the execution. The event's
+  `background` lists running shells/subagents/images with the owning `sessionID`. It does not run
+  after an interrupted or failed execution. The plugin uses it for X22/X23 ("Inbox and steering").
 - **Location eviction:** `LocationActivity` no longer evicts a location with an active execution or
   background job (#57416); `experimental.location_idle_timeout` overrides the 60-minute timeout.
 - **`ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})`** asks
@@ -113,7 +120,8 @@ the 2.3.0 packages and `tsc` is clean against their types.
   within milliseconds and `get().outcome` is `"failed"`. `context()` contains **only**
   `[user, {type:"idle", outcome:"failed"}]`, with no assistant message and no error text. When an
   assistant message does exist, `error: {type, message, status?}` is set on it *(types)*. The
-  runner reports that message, or a generic "agent session failed (terminal error)".
+  runner reports that message, or a generic "agent session failed (terminal error)". (2.3.0: the
+  failed idle marker carries the error itself, and the runner reports it first.)
 
 ## Inbox and steering (X01–X08)
 
@@ -167,6 +175,20 @@ reported `undelivered` and stays parked: no turn ever runs after the result was 
 Messages for an agent that has no session yet are appended to its first prompt instead. (Before
 0.2, messages went out with `resume:true`, which could start a successor turn after the runner
 had given up verifying: that turn ran unread and its tokens were never counted.)
+
+**opencode 2.3+: the `experimental.idle` hook** *(source; not yet live-verified)* closes most of
+that race inside the execution (`src/opencode/idle.ts`, X22/X23). The plugin instance registers it
+at setup (unless `OPENCODE_WORKFLOW_IDLE_HOOK=0`) and keeps a map of its live children (session id
+→ mailbox, schema, stopping). When a child is about to go idle the hook stops its mailbox
+(`finishing`), awaits sends in flight, and returns with the window reopened when a sent message is
+not in `context()` yet: it waits in the inbox, so opencode continues the same execution with it.
+A later message is refused `finishing` rather than parked. For a schema agent without an accepted
+submission it then sends the re-prompt text as a `resume:false` steer (a nudge, counted in the P21
+budget through the submit registry). The verification and wake above stay as the fallback for
+2.0.15, worktree children (their hook runs in the worktree instance, which has no mailbox; it can
+still nudge through the shared storage), a hook that hit its 3 s cap, and interrupted or failed
+turns. The plugin does not subscribe to `session.inbox.delivered` instead of checking
+`context()`: the check is still needed for the fallback paths, and one mechanism is simpler.
 
 ## RPC, events and TUI plugins (X11–X16)
 
