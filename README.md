@@ -391,7 +391,26 @@ and the panel):
 | `a` | any | show this session's runs, or every run of the project |
 | Esc | any | close the panel |
 
-`ctrl+x j` messages a running agent from anywhere (it asks which one when there are several).
+**Agent dialog.** `ctrl+x j` (or "Workflows: agents" in the command palette) opens a searchable list
+of the running and queued agents from anywhere, grouped by workflow and starting on the agent
+selected in the panel. Type `#3` or `3` to jump to agent 3, or part of a label, phase, workflow name
+or run id. Then:
+
+| Key | Does |
+|---|---|
+| Enter | send the agent a message (read at its next step) |
+| `ctrl+u` | send an urgent message (interrupts its current step) |
+| `ctrl+d` | stop the agent, after a confirmation |
+| `ctrl+o` | open the agent's session (in a tab when tabs are on) |
+
+**Sidebar.** When the session has runs, the session sidebar gets a **Workflows** section under
+opencode's own: up to three runs (running ones first) with a colored status dot, `done/total`, and a
+line with the current phase, running agents, tokens and cost. Click a run to open the panel on it.
+With more than two runs, click the header to fold the section (it stays folded across restarts and
+then shows `(1 running · $0.42)`).
+
+Right after opencode starts, the plugins may still be loading: the panel says `loading…` and the tree
+retries for a few seconds before it reports that the workflows RPC is unavailable.
 
 | Opening an agent (Enter) | Stopping it (`x`, then confirm) | Finished, with the notification |
 |---|---|---|

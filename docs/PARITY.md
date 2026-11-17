@@ -166,8 +166,10 @@ enter at the highest level possible: the plugin's `setup()` over a fake opencode
   mirrors what was verified live and in opencode's source.
 - The live-tree rows X10–X13 and the model rows X18–X19 run in `live-tree.test.ts`: the harness's fake `ctx.rpc` records the
   registration and emitted events, and its fake `ctx.event` stream feeds child-session events. The
-  TUI rows X14–X16 test the pure client logic (`src/tui/store.ts`) in `tui.test.ts`; the Solid view
-  itself is checked live (docs/E2E.md "TUI live check").
+  TUI rows X14–X16 test the pure client logic (`src/tui/store.ts`, re-exporting the host-agnostic
+  `src/client/tree.ts`) in `tui.test.ts`, and X25–X27 the agent dialog, sidebar and resync helpers
+  (`src/client/tree.ts`, `src/client/sync.ts` over a fake RPC, `tests/helpers/fake-tree-rpc.ts`) in
+  `tui-client.test.ts`; the Solid view itself is checked live (docs/E2E.md "TUI live check").
 - The doc examples run verbatim in `doc-examples.test.ts`: the `audit-routes` script, the
   bundled `/deep-research`, and the resume case where A, B (fails), C and D start in that order,
   in `runs-resume.test.ts`.

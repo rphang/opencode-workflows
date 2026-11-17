@@ -500,8 +500,9 @@ If `ctx.event.subscribe` is missing or throws, the tree still works from engine 
   `@opentui/solid`, `@opentui/keymap`, `@opencode/plugin`, `@opencode/plugin/tui` stay **external**:
   the host swaps in its own copies for those specifiers even under `node_modules`, but it does
   **not** JSX-transform files there, so `dist/tui.js` must already be compiled.
-- **devDependencies** (exact, matching opencode 2.0.15's catalog): `@opentui/core@0.5.10`,
-  `@opentui/solid@0.5.10`, `solid-js@1.9.15`. **No new runtime dependencies.** The published
+- **devDependencies** (exact, matching opencode's catalog; 2.0.15 had `@opentui/*@0.5.10` and
+  `solid-js@1.9.15`, 2.3.0 has `@opentui/core@0.8.4`, `@opentui/solid@0.8.4`, `solid-js@1.9.17`).
+  **No new runtime dependencies.** The published
   `dist/tui.js` imports only host-provided modules.
 - **Module shape**: `export default { id: "dynamic-workflows.tui", setup(ctx) {…} }`
   (`Plugin.define` is the identity function).
@@ -515,14 +516,15 @@ If `ctx.event.subscribe` is missing or throws, the tree still works from engine 
 | Prompt footer | `ui.slot({append:"prompt.footer.status"})` | `wf deep-research 7/12 · 81k · $0.42` for the newest active run of the viewed session; `+2` when more are active; empty when none |
 | Home footer | `ui.slot({append:"home.footer.status"})` | `wf 2 running` for the default Location |
 | Tree panel | `ui.slot({append:"session.panel"})` rendering when `input.name === "workflows"` | The tree (§B.4). `ui.panel.open("workflows")` works only on a session route (verified); from home it navigates to the parent session first |
-| Commands | `ctx.keymap.layer(() => ({mode:"global", commands:[…]}))`, registered from an `append:"app"` slot render that returns `null` (the `/btw` pattern, verified) | see below |
+| Commands | `ctx.keymap.layer(() => ({mode:"global", commands:[…]}))`, created in `setup` (opencode 2.3 registers setup-time layers for the plugin's lifetime; on 2.0.15 it needed an `append:"app"` slot render that returned `null`, the `/btw` pattern) | see below |
+| Sidebar | `ui.slot({append:"sidebar.content"})` (2.3, input `{sessionID}`) | The session's runs (X26): header with a collapse toggle past 2 runs, up to 3 runs with a status dot, `done/total` and a phase · running · tokens · cost line; a click opens the panel on that run |
 
 Global commands (leader = `ctrl+x`; `<leader>o/k/j/h/d` were verified unbound in 2.0.15):
 
 | Bind | Id | Palette / slash | Action |
 |---|---|---|---|
 | `<leader>o` | `workflows.panel` | `/wf` | toggle the tree panel |
-| `<leader>j` | `workflows.message` | "Workflows: message agent" | steer the selected agent (or pick one with `ui.dialog.select`) |
+| `<leader>j` | `workflows.message` | "Workflows: agents (steer, stop, open)" | the agent dialog (X25): `ui.dialog.select` with 2.3's `search` and footer `actions`, starting on the panel's selected agent; Enter steers, `ctrl+u` urgent steer, `ctrl+d` stop, `ctrl+o` open |
 
 Panel-local keys, active only while `input.focused` is true, through a second keymap layer
 created inside the panel's render:
@@ -560,14 +562,22 @@ on (their recorded `AgentRecord.model`, X18, or the `step.started` model when it
 then `+n`). Agent rows show the agent's model in short form when narrow (X19). Rows are virtualized to the panel height, and the selected row
 stays visible.
 
-## B.5 Client state (`src/tui/store.ts`, pure TS, no Solid imports)
+## B.5 Client state (`src/client/`, pure TS, no Solid imports)
 
+- The host-agnostic part lives in `src/client/` so a GUI companion can share it: `tree.ts`
+  (`TreeStore`, `rowsFor`, `actionFor`, `targetFor`, `footerParts`, the agent-dialog and sidebar
+  helpers, `finishMessage`) and `sync.ts` (`TreeSync`, the resync driver). Neither imports Solid,
+  opentui, node builtins or `process`. `src/tui/store.ts` keeps the terminal-width code (`fitSegments`,
+  `rowText`, `helpText`, `footerText`, `notifyFinished`) and re-exports the rest.
 - `TreeStore.apply(delta)` merges by `runId` / `(runId, index)`, and `seq` gaps trigger a `list`
-  resync. Also resynced on mount, every 15 s while a run is active, and after every `control` call.
+  resync. Also resynced on mount, when the target changes (a Solid effect over the route and session
+  data, both stores in 2.3), every 15 s while a run is active, after every `control` call and on the
+  host's `plugin.updated`. A `list` that throws is retried after 250 ms doubling to 4 s (X27).
 - `footerText(runs, sessionID)`, `rowsFor(state, expanded, filter)`, and
   `actionFor(row, key) → ControlInput | {open: sessionID} | null` are pure functions, so they are
   unit-tested without a renderer.
-- The Solid view (`src/tui/index.tsx`, `src/tui/panel.tsx`) only maps store signals to `<box>`/`<text>`.
+- The Solid view (`src/tui/index.tsx`, `src/tui/panel.tsx`, `src/tui/sidebar.tsx`) only maps store
+  signals to `<box>`/`<text>`.
 
 ## B.6 Location, scoping and filtering
 
@@ -637,14 +647,14 @@ optional `activity: Map<number, AgentActivity>` argument, so the tests stay pure
 
 | Situation | Behavior |
 |---|---|
-| RPC not registered (older opencode, `ctx.rpc` missing) | The server skips registration. The TUI's first `list` gets `rpc.unavailable`, so the TUI renders nothing, shows a single toast from `/wf` ("workflows RPC unavailable; use /workflows"), and the text view keeps working. |
+| RPC not registered (plugin disabled, `ctx.rpc` missing) or not loaded yet (2.3's `rpc.call` no longer waits for plugins, so a cold start's first `list` can fail) | The server skips registration. The TUI's `list` gets `rpc.unavailable`; it retries after 250, 500, 1000, 2000 and 4000 ms (the panel says `loading…`), then shows "workflows RPC unavailable (…); use /workflows" and renders no footer or sidebar. `plugin.updated`, a target change or a delta from the Location starts over (X27). The text view keeps working. |
 | Plugin disabled (P57) | No RPC, and the TUI behaves as above. It checks with `list` before claiming its slots. |
 | TUI entry fails to load (bad build) | The server plugin is unaffected (separate entry). Covered by a build smoke test. |
 | Worktree Location instance answers | Its registry is empty. Avoided by rule B.6-1, and a `list` with no runs from a child's Location triggers a retry against the parent's Location. |
 | Many projects on one server | Filtered by `directory` (B.6-2). |
 | Event stream reconnect / missed deltas | `seq` gap → `list` resync; periodic resync every 15 s. |
 | Child events not delivered for worktree children | Those agents show no activity (engine status only). Verified live in e2e; documented if confirmed. |
-| Panel keys conflict with host keys | Panel layer only while focused; global binds limited to `<leader>o`/`<leader>j`. If a conflict shows up live, fall back to palette-only commands. |
+| Panel keys conflict with host keys | Panel layer only while focused; global binds limited to `<leader>o`/`<leader>j`. The agent dialog's actions (`ctrl+u`/`ctrl+d`/`ctrl+o`) are bound only while it is open, like the host's own dialogs (session list `ctrl+d`, model dialog `ctrl+u`), and leave `ctrl+n`/`ctrl+p` to the list. If a conflict shows up live, fall back to palette-only commands. |
 
 ## B.10 Cut from v1
 
@@ -652,7 +662,8 @@ optional `activity: Map<number, AgentActivity>` argument, so the tests stay pure
 - Dollar budgets and per-agent caps (roadmap 0.3).
 - Showing per-agent prompts and results inside the panel. Enter opens the child session, which is
   the full transcript (P74).
-- Mouse interaction, a sidebar slot, and a web UI panel. The web UI gets the text view (§B.8) and
+- Mouse interaction in the panel, and a web UI panel (the sidebar summary came with opencode 2.3's
+  `sidebar.content` slot, X26; its rows take a click). The web UI gets the text view (§B.8) and
   can call the RPC over HTTP.
 - A separate "history" browser for finished runs of other sessions (the `a` toggle covers the
   Location).
@@ -869,7 +880,8 @@ Where the implementation differs from, or adds to, the plan above:
   watching folded up under them). Emoji-capable glyphs (✉ ⚙ ✎) render double-width in Windows conhost
   and shift the row, so the tree and `activityText` use narrow ones (`»`, curly quotes, `msg 2`).
   Directory filtering uses the RPC event's `location.directory`, so the per-instance `seq` of another
-  Location never causes a false gap. A 500 ms watcher resyncs when the viewed session changes.
+  Location never causes a false gap. A 500 ms watcher resyncs when the viewed session changes (on
+  2.3 a Solid effect over the route and session stores replaced it).
 - **Not done in v1:** `rpc.test.ts` (automated live RPC e2e) — the RPC was checked live over HTTP and
   from the TUI instead (docs/E2E.md "TUI live check"); worktree-child activity was not checked live.
 
