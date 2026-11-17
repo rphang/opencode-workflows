@@ -12,11 +12,11 @@
 // older opencode) it stays silent; /workflows keeps working.
 
 import { createMemo, createSignal, Show } from "solid-js"
-import type { AgentView, FinishedEvent } from "../plugin/live.ts"
+import { TreeSync } from "../client/sync.ts"
+import type { AgentView } from "../plugin/live.ts"
 import { definition } from "../plugin/rpc-def.ts"
 import { Panel } from "./panel.tsx"
 import {
-  acceptRun,
   footerParts,
   homeFooterText,
   isActive,
@@ -67,85 +67,26 @@ const plugin = {
     }
     const location = () => ({ location: { directory: target().directory } })
 
-    // One `list` at a time. Events that arrive while it is in flight are replayed over its result
-    // (TreeStore.beginSync/replace), and a resync asked for meanwhile runs once more afterwards: the
-    // gap it reports may be newer than the list already in flight.
-    let syncing: Promise<void> | undefined
-    let again = false
-    const resync = (): Promise<void> => {
-      if (syncing) {
-        again = true
-        return syncing
-      }
-      syncing = (async () => {
-        do {
-          again = false
-          const f = filter()
-          tree.beginSync()
-          try {
-            const res = await rpc.list(f.sessionID ? { sessionID: f.sessionID } : { all: true }, location())
-            if (res?.ok) {
-              tree.replace(res)
-              setAvailable(true)
-              setStatus("")
-              bump()
-            } else {
-              tree.endSync()
-              if (res?.message) setStatus(clip(res.message, 120))
-            }
-          } catch (e) {
-            // rpc.unavailable (plugin disabled or not loaded in that Location): stay silent.
-            tree.endSync()
-            setAvailable(false)
-            setStatus(`workflows RPC unavailable (${clip(errText(e), 80)}); use /workflows`)
-          }
-        } while (again)
-        syncing = undefined
-      })()
-      return syncing
-    }
-
-    const sameLocation = (e: any) => {
-      const dir = e?.location?.directory ?? e?.data?.directory ?? e?.data?.runs?.[0]?.directory
-      return typeof dir === "string" && acceptRun({ directory: dir, parentSessionID: null }, { directory: target().directory, sessionID: null })
-    }
-
-    cleanups.push(
-      rpc.events.on("delta", (e: any) => {
-        if (!sameLocation(e)) return
-        const d = e.data ?? {}
-        const epoch = typeof d.epoch === "string" ? d.epoch : null
-        const { gap } = tree.apply({ seq: Number(d.seq) || 0, epoch, runs: d.runs ?? [], agents: d.agents ?? [] })
-        setAvailable(true)
+    // The resync driver (src/client/sync.ts): one `list` at a time, events replayed over it, gap and
+    // epoch resyncs, and the finish notification once per run of the viewed session.
+    const sync = new TreeSync({
+      rpc,
+      target: filter,
+      tree,
+      onChange: () => {
+        setAvailable(sync.available)
+        setStatus(sync.status)
         bump()
-        if (gap) void resync()
-      }),
-    )
-    cleanups.push(
-      rpc.events.on("finished", (e: any) => {
-        const d = (e.data ?? {}) as FinishedEvent
-        if (!sameLocation(e)) return
-        // Once per run the tree was showing: not for a duplicate, nor for a run it never knew.
-        const fresh = tree.finished(d)
-        bump()
-        if (!fresh) return
-        const f = filter()
-        if (f.sessionID && d.parentSessionID !== f.sessionID) return
-        void notifyFinished(d, { attention: ctx.attention, toast: ctx.ui.toast })
-      }),
-    )
+      },
+      onFinished: (d) => void notifyFinished(d, { attention: ctx.attention, toast: ctx.ui.toast }),
+    })
+    const resync = () => sync.resync()
+    sync.start()
+    cleanups.push(() => sync.dispose())
 
     // Resync when the viewed session (and so the target) or the scope changes, and periodically
     // while a run is active (missed events, reconnects).
-    let lastKey = ""
-    const watchTarget = setInterval(() => {
-      const f = filter()
-      const key = `${f.directory}|${f.sessionID}`
-      if (key !== lastKey) {
-        lastKey = key
-        void resync()
-      }
-    }, 500)
+    const watchTarget = setInterval(() => sync.checkTarget(), 500)
     const periodic = setInterval(() => {
       if ([...tree.runs.values()].some(isActive)) void resync()
     }, RESYNC_MS)
@@ -358,7 +299,6 @@ const plugin = {
       }),
     )
 
-    void resync()
     return () => {
       for (const c of cleanups.splice(0).reverse()) {
         try {

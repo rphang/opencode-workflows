@@ -4,7 +4,8 @@
 // plugins, including those under node_modules, but it does NOT JSX-transform files under
 // node_modules. So the JSX is compiled here with @opentui/solid's Babel transform (Solid "universal"
 // mode, module @opentui/solid), and every host-provided module stays external: the bundle ships no
-// copy of solid-js or opentui, only our own code.
+// copy of solid-js or opentui, only our own code (src/tui plus the host-agnostic src/client it uses,
+// which is bundled in).
 
 import path from "node:path"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
