@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createOpencodeRunner, STRUCTURED_SUBAGENT_PREAMBLE, SUBAGENT_PREAMBLE } from "../../src/opencode/runner.ts"
 import { evaluatePermission } from "../../src/opencode/permissions.ts"
-import { createSubmitRegistry, createSubmitTool, SUBMIT_STORAGE_PREFIX } from "../../src/opencode/submit.ts"
+import {
+  attemptsUsed,
+  createSubmitRegistry,
+  createSubmitTool,
+  currentAttemptMissed,
+  retryPrompt,
+  SUBMIT_STORAGE_PREFIX,
+} from "../../src/opencode/submit.ts"
 import { EFFORT_VARIANTS, formatModelRef, parseModelRef, resolveChildModel } from "../../src/opencode/model.ts"
 import type { AgentOptions, AgentRecord, AgentRequest } from "../../src/types.ts"
 import { createFakeCtx, type FakeCtxOptions } from "../helpers/fake-opencode-ctx.ts"
@@ -206,6 +213,68 @@ describe("submit.ts", () => {
     expect((await a.read("s1"))?.accepted).toEqual({ value: { answer: "z" } })
     await a.unregister("s1")
     expect(storage.has(SUBMIT_STORAGE_PREFIX + "s1")).toBe(false)
+  })
+
+  const sharedStore = () => {
+    const storage = new Map<string, unknown>()
+    return {
+      storage,
+      get: async (k: string) => structuredClone(storage.get(k)) as any,
+      set: async (k: string, v: unknown) => void storage.set(k, structuredClone(v)),
+      remove: async (k: string) => void storage.delete(k),
+    }
+  }
+
+  test("P21 X23 copies are ordered by a monotonic rev: another instance's nudge (no new failure) is not dropped", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    const b = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    expect((await a.read("s1"))?.rev).toBe(1)
+    await b.nextAttempt("s1", "nudge")
+    // a's memory copy has the same failures (0) but an older rev: storage wins.
+    expect(await a.read("s1")).toMatchObject({ failures: 0, missed: 1, nudges: 1, mark: 0, rev: 2 })
+  })
+
+  test("P21 X23 an accepted copy still wins over a newer rev without acceptance", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    await a.submit("s1", { answer: "x" })
+    const stale = { schema: SCHEMA, failures: 0, rev: 9 }
+    store.storage.set(SUBMIT_STORAGE_PREFIX + "s1", stale)
+    expect((await a.read("s1"))?.accepted).toEqual({ value: { answer: "x" } })
+  })
+
+  test("P21 X23 attempt accounting: a stop after an invalid submission is not a missed attempt; a stop without one is", async () => {
+    const registry = createSubmitRegistry()
+    await registry.register("s1", SCHEMA)
+    let st = (await registry.read("s1"))!
+    expect(currentAttemptMissed(st)).toBe(true)
+    expect(attemptsUsed(st)).toBe(1) // the first attempt ended without a submission
+    await registry.submit("s1", { answer: 1 })
+    st = (await registry.read("s1"))!
+    expect(currentAttemptMissed(st)).toBe(false)
+    expect(attemptsUsed(st)).toBe(1) // the invalid submission is the attempt: not counted twice
+    expect(retryPrompt(st)).toContain("failed schema validation")
+    st = (await registry.nextAttempt("s1", "prompt"))!
+    expect(st).toMatchObject({ failures: 1, missed: 0, mark: 1, nudges: 0 })
+    expect(attemptsUsed(st)).toBe(2) // that new attempt, if it ends now, missed
+    expect(retryPrompt(st)).toContain("did not call")
+    st = (await registry.nextAttempt("s1", "nudge"))!
+    expect(st).toMatchObject({ failures: 1, missed: 1, mark: 1, nudges: 1 })
+    expect(attemptsUsed(st)).toBe(3)
+  })
+
+  test("P21 X23 the tool's `no attempts left` counts missed attempts too", async () => {
+    process.env.MAX_STRUCTURED_OUTPUT_RETRIES = "3"
+    const registry = createSubmitRegistry()
+    const tool = createSubmitTool(registry)
+    await registry.register("s1", SCHEMA)
+    await registry.nextAttempt("s1", "nudge")
+    await registry.nextAttempt("s1", "nudge")
+    const r = await tool.execute({ output: {} }, { sessionID: "s1" } as any)
+    expect(String(r.content)).toMatch(/no attempts left/i)
   })
 })
 

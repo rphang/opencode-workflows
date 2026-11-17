@@ -38,7 +38,7 @@ import {
   type PermissionRule,
 } from "./permissions.ts"
 import { formatOrchestratorMessage, STEERING_PREAMBLE_LINE } from "./steer.ts"
-import { createSubmitRegistry, type SubmitRegistry } from "./submit.ts"
+import { attemptsUsed, createSubmitRegistry, retryPrompt, type SubmitRegistry, type SubmitState } from "./submit.ts"
 
 export type { PermissionRule } from "./permissions.ts"
 
@@ -571,30 +571,24 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
 
         // Structured output (P21).
         await registry.register(sessionID, schema)
+        // Attempts are counted in the registry (submit.ts attemptsUsed): invalid submissions, plus every
+        // attempt that ended without one, whether the idle hook nudged it (X23) or the runner re-prompts.
         const max = maxStructuredRetries()
-        let missed = 0
         let prompt = withHeld(`${childPrompt(request.prompt, true)}\n\n${structuredOutputInstructions(schema)}`)
         let firstTurn = true
+        let state: SubmitState | undefined
         for (;;) {
-          const before = (await registry.read(sessionID))?.failures ?? 0
           const end = firstTurn ? await turn(prompt, reportHeld) : await turn(prompt)
           firstTurn = false
           if (end) return end
-          const state = await registry.read(sessionID)
+          state = await registry.read(sessionID)
           if (state?.accepted) return { status: "completed", value: state.accepted.value as Json, usage, sessionID }
-          const failures = state?.failures ?? 0
-          if (failures === before) missed++
-          if (failures + missed >= max) break
-          prompt =
-            (state?.lastError && failures > before
-              ? `Your ${SUBMIT_TOOL_NAME} output failed schema validation:\n${state.lastError}\n\n`
-              : `You did not call the \`${SUBMIT_TOOL_NAME}\` tool with a valid result.\n\n`) +
-            `Call \`${SUBMIT_TOOL_NAME}\` now with the \`output\` argument matching the schema from your instructions. ` +
-            "Do not redo the work: submit the result you already have."
+          if (!state || attemptsUsed(state) >= max) break
+          prompt = retryPrompt(state)
+          await registry.nextAttempt(sessionID, "prompt")
         }
 
         // Retries spent: fall back to JSON in the last reply.
-        const state = await registry.read(sessionID)
         const messages = (await ctx.session.context({ sessionID })) as any[]
         const text = lastAssistantText(messages)
         let lastError = state?.lastError
@@ -604,7 +598,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
           if (v.ok) return { status: "completed", value: extracted as Json, usage, sessionID }
           lastError ??= v.error
         }
-        const attempts = (state?.failures ?? 0) + missed
+        const attempts = state ? attemptsUsed(state) : max
         return {
           status: "schema_failed",
           error:
