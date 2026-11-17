@@ -8,7 +8,43 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Steering at the idle boundary** (opencode 2.3+, X22). A message to an agent that is finishing
+  its turn is read in that same turn through opencode's `experimental.idle` hook: no wake-up, no
+  extra turn. A message that arrives after that is refused `finishing` instead of being parked
+  unread. Worktree agents, a hook timeout and opencode without the hook keep the 0.2 path.
+- **Schema nudge** (opencode 2.3+, X23). A schema agent that stops without calling
+  `workflow_submit` is nudged in the same turn. Nudges count against
+  `MAX_STRUCTURED_OUTPUT_RETRIES`, shared with the runner's re-prompts.
+  `OPENCODE_WORKFLOW_IDLE_HOOK=0` turns the hook off.
+- **`workflow_script`** (opencode 2.3+, X24): a freeform tool that takes a new inline script as raw
+  text (no JSON escaping) on models whose capabilities list freeform text; it is removed from
+  requests for other models. It shares the `workflow` permission key, so every deny of `workflow`
+  covers it; the `workflow` tool is unchanged. Turn it off with `freeformTool: false` or
+  `OPENCODE_WORKFLOW_FREEFORM=0`.
+- **TUI agent dialog** (X25): `<leader>j` opens one searchable list of running agents. Enter
+  steers, `ctrl+u` sends an urgent message, `ctrl+d` stops, `ctrl+o` opens the child session.
+- **TUI sidebar section** (X26): a Workflows summary in the session sidebar (foldable when there
+  are more than two runs); a child session shows its parent's runs.
+
+### Fixed
+
+- Failed agents report opencode 2.3's actual error instead of "agent session failed (terminal error)".
+- After an urgent message whose follow-up turn produced no text, the result no longer falls back to
+  the cut-off text of the interrupted step.
+- TUI cold start on opencode 2.3 (X27): the tree retries its first list while plugins load and
+  starts over on `plugin.updated`, instead of staying empty until a run starts.
+
 ### Changed
+
+- A `scriptPath` that needs approval now raises opencode's own permission prompt on the `workflow`
+  tool call (`ctx.permission.assert`) and honours saved "always" approvals, instead of being
+  refused. A plain rejection ends the step. `workflow({scriptPath})` inside a running script still
+  never prompts: only allow rules and saved approvals admit it.
+- TUI internals: global commands are registered at setup, `setup` is typed, the 500 ms target
+  poll is a reactive effect, and the host-agnostic tree logic lives in `src/client/` (shared with
+  the upcoming GUI part; no `process` reference, so it runs in a browser).
 
 - **Requires opencode 2.3.0** (was 2.0.15). `@opencode/*` 2.3.0, `effect` 4.1.0 (the version
   codemode 2.3.0 needs; older pins crash every run), and the TUI is built with OpenTUI 0.8.4 and
