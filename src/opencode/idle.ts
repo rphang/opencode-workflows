@@ -4,10 +4,15 @@
 // goes idle; input admitted from it (or still arriving while it runs) continues the SAME execution
 // (core/session/runner/llm.ts: hooks, then `SessionInbox.has(…, "input")`). For a workflow child:
 //
+//   0. X31: the child's own subagent/image jobs are reported to the job tracker (background.ts), and
+//      while any runs the hook stops here: the job's report wakes the child later, the window stays
+//      open (a message waits in the inbox for that execution) and nothing is nudged.
 //   1. X22 flush (children of this instance's runs): the agent's mailbox stops taking messages
 //      (`finishing`) and awaits the sends in flight. A sent message not in the child's context yet
 //      waits in the inbox, so opencode continues with it: the window reopens and the hook returns.
-//      A message posted after this point is refused `finishing` instead of being parked.
+//      A message posted after this point is refused `finishing` instead of being parked. If the
+//      execution goes on anyway (another plugin's idle hook, a user prompt, the hook's cap), the
+//      session "context" hook, which runs before every model request, reopens the window.
 //   2. X23 nudge (schema agents, P21): no accepted workflow_submit, the agent is not being stopped,
 //      its own subagent/image job is not running (that job's notice wakes it and the hook runs again,
 //      like core/plugin/goal.ts) and the P21 budget is not spent: the runner's re-prompt text goes in
@@ -22,10 +27,13 @@
 import type { Plugin } from "@opencode/plugin"
 import type { AgentMailbox } from "../mailbox.ts"
 import { maxStructuredRetries } from "../schema.ts"
+import { createJobTracker, ownJobs, type JobTracker } from "./background.ts"
 import { createWorkflowChildLookup } from "./children.ts"
 import { attemptsUsed, retryPrompt, type SubmitRegistry } from "./submit.ts"
 
 export const IDLE_HOOK_NAME = "experimental.idle"
+/** Runs before every model request of a session: where a window the idle hook closed reopens. */
+export const CONTEXT_HOOK_NAME = "context"
 /** `0`/`false`/`no`/`off` registers no idle hook (the runner's fallbacks then do all the work). */
 export const IDLE_HOOK_ENV = "OPENCODE_WORKFLOW_IDLE_HOOK"
 export const IDLE_HOOK_TIMEOUT_MS = 3000
@@ -70,20 +78,23 @@ export class ChildLiveRegistry {
 /** The subset of opencode's SessionIdle event the hook reads. */
 export interface IdleEvent {
   readonly sessionID: string
-  readonly background?: ReadonlyArray<{ readonly kind: string; readonly sessionID: string }>
+  readonly background?: ReadonlyArray<{ readonly kind: string; readonly sessionID: string; readonly [k: string]: unknown }>
 }
 
 export interface IdleHookOptions {
   registry: SubmitRegistry
   live: ChildLiveRegistry
+  /** Where the child's background jobs are reported (X31). Default: a tracker over ctx.storage. */
+  jobs?: JobTracker
   /** Cap on one hook run (default IDLE_HOOK_TIMEOUT_MS). */
   timeoutMs?: number
 }
 
-type IdleCtx = Pick<Plugin.Context, "session">
+type IdleCtx = Pick<Plugin.Context, "session"> & Partial<Pick<Plugin.Context, "storage">>
 
 export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: IdleEvent) => Promise<void> {
   const { registry, live } = options
+  const jobs = options.jobs ?? createJobTracker(ctx.storage)
   const cap = options.timeoutMs ?? IDLE_HOOK_TIMEOUT_MS
   const workflowRunOf = createWorkflowChildLookup(ctx)
 
@@ -93,7 +104,7 @@ export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: 
     if (!sent.length || expired()) return false
     const ids = new Set(((await ctx.session.context({ sessionID })) as any[]).map((m) => m?.id))
     if (sent.every((s) => ids.has(s.deliveryId)) || expired()) return false
-    mailbox.open()
+    mailbox.reopen()
     return true
   }
 
@@ -103,6 +114,10 @@ export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: 
     const entry = live.get(sessionID)
     const runId = entry ? entry.runId : await workflowRunOf(sessionID)
     if (runId === undefined || entry?.stopping) return
+    // X31: while its own subagent/image job runs, the child is not done: the job's report wakes it.
+    const own = ownJobs(sessionID, event.background)
+    await jobs.report(sessionID, own, !!entry)
+    if (own.length) return
     // Only a window this turn had open is the hook's to close and reopen. One the runner closed itself
     // (between schema retries, or while it verifies and wakes for parked messages, X03) stays closed:
     // a message sent then would never be verified.
@@ -111,9 +126,8 @@ export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: 
 
     // X23: a schema agent that stops without an accepted submission is asked again, in this execution.
     if (entry && !entry.schema) return
-    if (event.background?.some((w) => (w.kind === "subagent" || w.kind === "image") && w.sessionID === sessionID)) return
-    // A child of another instance (worktree): only the shared stored state counts.
-    const state = await registry.read(sessionID, { stored: !entry })
+    // A child of another instance (worktree) is read from the shared storage (submit.ts).
+    const state = await registry.read(sessionID)
     if (!state || state.accepted || attemptsUsed(state) >= maxStructuredRetries()) return
     if (expired() || entry?.stopping) return
     const nudge = (state.nudges ?? 0) + 1
@@ -124,7 +138,10 @@ export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: 
       delivery: "steer",
       resume: false,
     } as any)
-    mailbox?.open()
+    // Past the cap the hook has already returned: the execution may have ended without the nudge
+    // (it then waits in the inbox) and the runner counts the attempt when it re-prompts.
+    if (expired()) return
+    mailbox?.reopen()
     await registry.nextAttempt(sessionID, "nudge")
   }
 
@@ -156,12 +173,36 @@ export function createIdleHook(ctx: IdleCtx, options: IdleHookOptions): (event: 
 export async function registerIdleHook(ctx: IdleCtx, options: IdleHookOptions): Promise<{ dispose: () => Promise<void> } | undefined> {
   const hook = (ctx.session as { hook?: unknown } | undefined)?.hook
   if (typeof hook !== "function") return undefined
-  try {
-    const reg = (await (hook as Function).call(ctx.session, IDLE_HOOK_NAME, createIdleHook(ctx, options))) as
-      | { dispose?: () => Promise<void> | void }
-      | undefined
-    return { dispose: async () => void (await reg?.dispose?.()) }
-  } catch {
-    return undefined
+  type Reg = { dispose?: () => Promise<void> | void } | undefined
+  const add = async (name: string, cb: (event: any) => unknown): Promise<Reg | null> => {
+    try {
+      return (await (hook as Function).call(ctx.session, name, cb)) as Reg
+    } catch {
+      return null
+    }
+  }
+  const idle = await add(IDLE_HOOK_NAME, createIdleHook(ctx, options))
+  if (idle === null) return undefined
+  // X22: reopen a window the idle hook closed once the execution takes another model step anyway.
+  const context = await add(CONTEXT_HOOK_NAME, createReopenHook(options.live))
+  return {
+    dispose: async () => {
+      for (const r of [context, idle]) {
+        try {
+          await r?.dispose?.()
+        } catch {}
+      }
+    },
+  }
+}
+
+/** Session "context" hook: the next model step of a live child reopens a window quiesce() closed. */
+export function createReopenHook(live: ChildLiveRegistry): (event: { readonly sessionID?: unknown }) => void {
+  return (event) => {
+    try {
+      live.get(String(event?.sessionID ?? ""))?.mailbox?.reopen()
+    } catch {
+      // never fail the model request
+    }
   }
 }

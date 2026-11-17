@@ -225,6 +225,25 @@ describe("AgentMailbox quiesce (X22 idle hook)", () => {
     expect((await mb.close()).map((s) => s.deliveryId)).toEqual(["del_1"])
   })
 
+  test("reopen() undoes only quiesce(): not a window the runner closed, opened or sealed since", async () => {
+    const mb = new AgentMailbox()
+    mb.attach(async () => ({ id: "d" }))
+    mb.open()
+    await mb.quiesce()
+    expect(mb.reopen()).toBe(true)
+    expect(mb.state).toBe("open")
+    expect(mb.reopen()).toBe(false) // already open
+    await mb.quiesce()
+    await mb.close() // the runner took the window over
+    expect(mb.reopen()).toBe(false)
+    expect(mb.state).toBe("finishing")
+    mb.open()
+    await mb.quiesce()
+    mb.seal()
+    expect(mb.reopen()).toBe(false)
+    expect(mb.state).toBe("closed")
+  })
+
   test("quiesce leaves a mailbox that is not open as it is (between turns, closed)", async () => {
     const mb = new AgentMailbox()
     mb.attach(async () => ({ id: "d" }))

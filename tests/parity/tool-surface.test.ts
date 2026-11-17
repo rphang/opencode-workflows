@@ -413,7 +413,8 @@ describe("X24 workflow_script: freeform inline script", () => {
       const p = await h.setup(setup as any)
       expect(p.tools().has("workflow_script")).toBe(false)
       expect(p.tools().has("workflow")).toBe(true)
-      expect(p.fake.sessionHooks.filter((x) => x.name === "context")).toHaveLength(0)
+      // No freeform filter; the only "context" hook left is the X22 steering-window one.
+      expect(p.fake.sessionHooks.filter((x) => x.name === "context")).toHaveLength(1)
     })
   }
 

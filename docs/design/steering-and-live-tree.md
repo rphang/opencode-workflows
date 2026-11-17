@@ -253,6 +253,14 @@ unchanged as the fallback: the hook never fires on 2.0.15, a worktree child's ho
 instance without the mailbox, and a hook that exceeds its 3 s cap or a turn that was interrupted
 does nothing.
 
+Review follow-up. `reopen()` undoes only `quiesce()`: it does nothing once the runner has called
+`close()`, `open()` or `seal()`. Besides the hook's own continuation, the session `context` hook
+(before every model request) calls it, so a window does not stay `finishing` when something else
+continues the execution (another plugin's idle hook, a user prompt in the child, the hook's cap).
+While the child's own subagent or image job runs (opencode 2.3's `subagent` tool is always
+background), the hook records the job, leaves the window open and sends no nudge; the runner waits
+after `wait()` until a report lists no job (X31, `src/opencode/background.ts`).
+
 ## A.5 Engine and host changes
 
 - `LiveAgent` gets `mailbox: AgentMailbox`, created at `callAgent` time in state `pending`, and it

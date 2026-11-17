@@ -8,6 +8,7 @@ import { listWorkflows, personalWorkflowsDir, projectWorkflowDirs, type Registry
 import { createOpencodeRunner } from "../opencode/runner.ts"
 import { createFreeformToolFilter } from "../opencode/freeform.ts"
 import { createPermissionAsserter, createUnattendedAskGuard } from "../opencode/permission-assert.ts"
+import { createJobTracker, type JobTracker } from "../opencode/background.ts"
 import { ChildLiveRegistry, idleHookEnabled, registerIdleHook } from "../opencode/idle.ts"
 import { createChildAskGuard, effectiveSessionRules } from "../opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, type SubmitRegistry } from "../opencode/submit.ts"
@@ -43,6 +44,8 @@ export interface RunnerInput {
   registry: SubmitRegistry
   /** Read by this instance's experimental.idle hook (X22, X23). */
   live: ChildLiveRegistry
+  /** Background jobs the idle hook reports and the runner waits for (X31). */
+  jobs: JobTracker
 }
 
 /** Injection seams (tests) and host overrides. Everything is optional. */
@@ -104,6 +107,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
   const store = deps.store ?? new RunStore(dataDir ? { root: dataDir } : {})
   const submitRegistry = createSubmitRegistry(ctx.storage)
   const liveChildren = new ChildLiveRegistry()
+  const jobTracker = createJobTracker(ctx.storage)
 
   const createRunner =
     deps.createRunner ??
@@ -114,6 +118,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
         runId: input.runId,
         registry: input.registry,
         live: input.live,
+        jobs: input.jobs,
         // P60: workflow agents can neither launch nor manage workflows.
         deniedTools: [WORKFLOW_TOOL_NAME, CONTROL_TOOL_NAME],
       }))
@@ -146,7 +151,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     store,
     registryOptions,
     createRunner: ({ parentSessionID, parentAgent, runId }) =>
-      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry, live: liveChildren }),
+      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry, live: liveChildren, jobs: jobTracker }),
     notify: (input) => ctx.session.synthetic(input as any),
     onSaved: reloadCommands,
     now: deps.now,
@@ -188,7 +193,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
       registrations.push(await permissionHook("evaluate", createChildAskGuard(ctx)))
     }
     // X22/X23: opencode 2.3+ runs `experimental.idle` before a session goes idle (2.0.15 never does).
-    const idleHook = idleHookEnabled(env) ? await registerIdleHook(ctx, { registry: submitRegistry, live: liveChildren }) : undefined
+    const idleHook = idleHookEnabled(env) ? await registerIdleHook(ctx, { registry: submitRegistry, live: liveChildren, jobs: jobTracker }) : undefined
     if (idleHook) registrations.push(idleHook)
     registrations.push(
       await ctx.tool.transform((editor) => {

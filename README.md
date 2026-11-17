@@ -113,10 +113,11 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 - **Safe by default.** Workflows start only when you opt in. Scripts run in a sandbox with no
   filesystem, network or shell. Agents inherit your permission rules and never get more.
 - **Tested for parity.** 60 behaviors are each tracked against Claude Code in
-  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test. The 30 extensions beyond
-  Claude Code (`X01`–`X30`: steering, the live progress tree, per-agent models, the per-agent
+  [`docs/PARITY.md`](docs/PARITY.md), and each has at least one test. The 31 extensions beyond
+  Claude Code (`X01`–`X31`: steering, the live progress tree, per-agent models, the per-agent
   failure summary and outputs, idle-boundary steering and schema nudges, the freeform
-  `workflow_script` tool, the TUI agent dialog and sidebar, and the desktop app companion) are specified and tested there the same way.
+  `workflow_script` tool, the TUI agent dialog and sidebar, waiting for background subagents, and the desktop app
+  companion) are specified and tested there the same way.
 
 ## Requirements
 
@@ -539,7 +540,7 @@ Set them in the environment of the opencode server. They work with every install
 | `MAX_STRUCTURED_OUTPUT_RETRIES` (or `OPENCODE_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES`) | `5` | Attempts a schema agent gets before `agent()` throws. |
 | `OPENCODE_WORKFLOW_FREEFORM` | unset (on) | `0`, `false`, `no` or `off` registers no `workflow_script` tool, like the `freeformTool: false` option. |
 | `OPENCODE_WORKFLOW_RPC_CONTROL` | unset (on) | `0`, `false`, `no` or `off` makes the live tree's RPC read-only, like the `rpcControl: false` option. |
-| `OPENCODE_WORKFLOW_IDLE_HOOK` | unset (on) | `0`, `false`, `no` or `off` registers no `experimental.idle` hook (opencode 2.3+). Without it, a steering message that lands as an agent finishes still reaches it through an extra turn, and a schema agent that forgot `workflow_submit` is re-prompted in a new turn instead of nudged in the same one. |
+| `OPENCODE_WORKFLOW_IDLE_HOOK` | unset (on) | `0`, `false`, `no` or `off` registers no `experimental.idle` hook (opencode 2.3+). Without it, a steering message that lands as an agent finishes still reaches it through an extra turn, and a schema agent that forgot `workflow_submit` is re-prompted in a new turn instead of nudged in the same one. It also turns off waiting for an agent's background subagents (opencode 2.3 runs them in the background): an agent that launched one is then read as soon as its turn ends. |
 | `OPENCODE_WORKFLOW_DATA_DIR` | `$XDG_DATA_HOME/opencode/workflows`, else `%LOCALAPPDATA%\opencode\workflows` (Windows) or `~/.local/share/opencode/workflows` | Run transcripts, stored as `<dir>/<sessionID>/<runId>/`. The `dataDir` plugin option wins over it. |
 
 ## How it compares to Claude Code
@@ -555,10 +556,11 @@ that check it:
 | ADAPTED | 1 | Same purpose, reached another way |
 | N/A | 1 | Cannot be done as an opencode plugin |
 
-The same file specifies the 30 extensions (status `EXT`, `X01`–`X30`): steering (including the
+The same file specifies the 31 extensions (status `EXT`, `X01`–`X31`): steering (including the
 opencode 2.3 idle-boundary flush and schema nudges), the live progress tree and its RPC, the
 per-agent model display, the per-agent failure summary and outputs, the freeform `workflow_script`
-tool, the TUI agent dialog and sidebar, and the desktop app companion.
+tool, the TUI agent dialog and sidebar, waiting for background subagents, and the desktop app
+companion.
 
 Most of the gaps come from one limit of opencode's plugin API: **a plugin cannot create a child
 session with a `parentID`**. So workflow agents aren't nested under your session in the UI, and

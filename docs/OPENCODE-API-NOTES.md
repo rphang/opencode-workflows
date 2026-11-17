@@ -30,7 +30,12 @@ the 2.3.0 packages and `tsc` is clean against their types.
   posts a `<subagent>` report with its last reply into the parent's inbox (steer) after **every**
   completed round and wakes the parent (#63209; the opt-out was removed in #63413). The runner
   therefore keeps creating root sessions (and P63 stays). Upstream's own `subagent` tool is now
-  always background (#63391).
+  always background (#63391): the call returns at once with the child's sessionID, the caller's
+  turn may end, and the job's `<subagent>` report wakes the caller later
+  (`core/tool/plugin/subagent.ts`). `session.wait()` is `awaitIdle` over executions only
+  (`core/session/run-coordinator.ts`), so it resolves while the job runs; the job is visible to a
+  plugin only in the `experimental.idle` event's `background` list. A workflow child that uses the
+  tool would be read too early: the runner waits for such jobs through the idle hook (X31).
 - **Failure text:** the `{type:"idle", outcome:"failed"}` context message carries
   `error: {type, message, status?}` (#53826). An interrupted step keeps its closed text and its
   assistant message gets `error: {type:"aborted", message:"Step interrupted"}` (#60674). Tokens of an
@@ -196,7 +201,11 @@ at setup (unless `OPENCODE_WORKFLOW_IDLE_HOOK=0`) and keeps a map of its live ch
 → mailbox, schema, stopping). When a child is about to go idle the hook stops its mailbox
 (`finishing`), awaits sends in flight, and returns with the window reopened when a sent message is
 not in `context()` yet: it waits in the inbox, so opencode continues the same execution with it.
-A later message is refused `finishing` rather than parked. For a schema agent without an accepted
+A later message is refused `finishing` rather than parked; if the execution goes on anyway (another
+plugin's idle hook, a user prompt, the cap), the session `context` hook, which runs before every
+model request, reopens the window the hook closed. While the child's own subagent or image job
+runs, the hook only records it (`workflow-jobs/<sessionID>` in `ctx.storage`) and the runner keeps
+waiting after `wait()` until a report lists none (X31). For a schema agent without an accepted
 submission it then sends the re-prompt text as a `resume:false` steer (a nudge, counted in the P21
 budget through the submit registry). The verification and wake above stay as the fallback for
 2.0.15, worktree children (their hook runs in the worktree instance, which has no mailbox; it can

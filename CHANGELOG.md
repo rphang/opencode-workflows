@@ -36,6 +36,15 @@ may contain breaking changes.
 
 ### Fixed
 
+- **Background subagents** (opencode 2.3, X31). opencode's `subagent` tool now always runs in the
+  background; an agent that launches one returns the answer it gives after the subagent reports,
+  not "I launched a subagent". A schema agent no longer spends a retry while its subagent runs,
+  and a worktree a running job may still use is kept. The wait ends on stop or the agent timeout
+  (30 min cap with a warning). Background shells are not waited for.
+- Steering messages are no longer refused for the rest of an agent's turn when another plugin or a
+  user prompt keeps the agent working.
+- A late structured-output nudge no longer uses up an extra retry; parallel or cross-instance
+  `workflow_submit` calls no longer lose an attempt or bring back a finished agent's state.
 - Failed agents report opencode 2.3's actual error instead of "agent session failed (terminal error)".
 - After an urgent message whose follow-up turn produced no text, the result no longer falls back to
   the cut-off text of the interrupted step.
