@@ -15,6 +15,7 @@ import { createMemo, createSignal, Show } from "solid-js"
 import { TreeSync } from "../client/sync.ts"
 import { definition } from "../plugin/rpc-def.ts"
 import { Panel } from "./panel.tsx"
+import { Sidebar } from "./sidebar.tsx"
 import {
   footerParts,
   homeFooterText,
@@ -27,8 +28,10 @@ import {
   pickerOptions,
   pickerSearch,
   rowsFor,
+  runKey,
   targetFor,
   TreeStore,
+  viewedSession,
   type Action,
   type ControlRequest,
   type Expanded,
@@ -184,6 +187,17 @@ const plugin = {
       }, 50)
     }
 
+    /** Sidebar click (X26): opens the panel (if needed) with the run selected and unfolded. */
+    const showRun = (runId: string | null) => {
+      if (runId) {
+        setSelected(runKey(runId))
+        expanded.set(runKey(runId), true)
+        bump()
+      }
+      if (ctx.ui.panel.current()?.name !== PANEL && !ctx.ui.panel.open(PANEL)) return toast("Could not open the workflows panel here", "warning")
+      void resync()
+    }
+
     /**
      * <leader>j (X25): one searchable dialog of the running and queued agents. Enter steers the
      * highlighted agent; ctrl+u (urgent steer), ctrl+d (stop) and ctrl+o (open) are footer actions.
@@ -218,8 +232,7 @@ const plugin = {
         render: (input: { sessionID?: string }) => {
           const parts = () => {
             version()
-            const sid = input.sessionID ? targetFor({ type: "session", sessionID: input.sessionID }, getSession, "").sessionID : null
-            return available() ? footerParts(visibleRuns(), sid) : null
+            return available() ? footerParts(visibleRuns(), viewedSession(input.sessionID, getSession)) : null
           }
           // Two texts so that, when the footer is narrow, only the name is shortened: the counts,
           // tokens and cost (flexShrink 0) always show whole. The separator is a no-break space: a
@@ -273,6 +286,19 @@ const plugin = {
               run={(a) => void runAction(a)}
             />
           </Show>
+        ),
+      }),
+    )
+    cleanups.push(
+      ctx.ui.slot({
+        append: "sidebar.content",
+        render: (input: { sessionID?: string }) => (
+          <Sidebar
+            ctx={ctx}
+            sessionID={() => (available() ? viewedSession(input.sessionID, getSession) : null)}
+            runs={visibleRuns}
+            openRun={showRun}
+          />
         ),
       }),
     )

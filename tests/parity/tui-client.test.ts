@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { listErrorKind, retryDelay } from "../../src/client/sync.ts"
-import { agentKey, PICKER_ACTIONS, pickerAction, pickerCurrent, pickerOptions, pickerSearch, runKey, TreeStore } from "../../src/tui/store.ts"
+import { agentKey, PICKER_ACTIONS, pickerAction, pickerCurrent, pickerOptions, pickerSearch, runKey, sidebarSummary, TreeStore, viewedSession } from "../../src/tui/store.ts"
 import { agent, DIR, driver, run, S, tick } from "../helpers/fake-tree-rpc.ts"
 
 const root = join(import.meta.dir, "..", "..")
@@ -112,6 +112,60 @@ describe("X25 agent dialog", () => {
     const src = readFileSync(join(root, "src", "tui", "index.tsx"), "utf8")
     expect(src).toMatch(/search: pickerSearch/)
     expect(src).toMatch(/PICKER_ACTIONS\.map/)
+  })
+})
+
+describe("X26 sidebar summary", () => {
+  const research = { title: "Research", model: null, agents: 8, done: 5, running: 3, tokens: 60_000, elapsedMs: 1000 }
+  const judge = { title: "Judge", model: null, agents: 4, done: 0, running: 0, tokens: 0, elapsedMs: null }
+  const runs = [
+    run({ runId: "wf_a", startedAt: 10, agents: { total: 12, done: 7, running: 3, queued: 2 }, tokens: 81_234, cost: 0.42, phases: [research, judge] }),
+    run({ runId: "wf_b", workflowName: "review", status: "completed", startedAt: 20, agents: { total: 4, done: 4, running: 0, queued: 0 }, tokens: 900, cost: 0.1 }),
+    run({ runId: "wf_c", workflowName: "audit", status: "failed", startedAt: 5, agents: { total: 2, done: 2, running: 0, queued: 0 } }),
+    run({ runId: "wf_d", workflowName: "old", status: "stopped", startedAt: 1 }),
+    run({ runId: "wf_e", parentSessionID: "ses_other", startedAt: 30 }),
+  ]
+
+  test("X26 header hint and up to 3 runs of the session: active newest first, then the newest finished, then `+n more`", () => {
+    const sum = sidebarSummary(runs, S)!
+    expect(sum.hint).toBe("1 running · $0.52")
+    expect(sum.total).toBe(4)
+    expect(sum.more).toBe(1)
+    expect(sum.collapsible).toBe(true)
+    expect(sum.items).toEqual([
+      { runId: "wf_a", name: "deep-research", progress: "7/12", detail: "Research · 3 running · 81.2k · $0.42", tone: "running" },
+      { runId: "wf_b", name: "review", progress: "4/4", detail: "completed · 900 · $0.10", tone: "success" },
+      { runId: "wf_c", name: "audit", progress: "2/2", detail: "failed · 0 · $0", tone: "error" },
+    ])
+  })
+
+  test("X26 hidden without runs; no toggle up to 2 runs; paused and finished-only hints; long names are shortened", () => {
+    expect(sidebarSummary(runs, "ses_none")).toBeNull()
+    expect(sidebarSummary([], S)).toBeNull()
+    expect(sidebarSummary([], null)).toBeNull()
+    const two = sidebarSummary([runs[1]!, runs[2]!], S)!
+    expect(two).toMatchObject({ hint: "2 runs · $0.10", collapsible: false, more: 0 })
+    const paused = sidebarSummary([run({ status: "paused", cost: 0.004, phases: [{ ...research, running: 0 }, judge] })], S)!
+    expect(paused.hint).toBe("1 paused · $0.0040")
+    // No phase is running: the first unfinished one is shown.
+    expect(paused.items[0]).toMatchObject({ tone: "paused", detail: "paused · Research · 2 running · 0 · $0.0040" })
+    expect(sidebarSummary([runs[3]!], S)!.items[0]!.tone).toBe("muted")
+    const long = sidebarSummary([run({ workflowName: "a-really-long-workflow-name-for-the-sidebar" })], S)!.items[0]!
+    expect([...long.name].length).toBeLessThanOrEqual(24)
+    expect(long.name.endsWith("…")).toBe(true)
+  })
+
+  test("X26 a workflow child session shows its parent's runs (the sidebar maps its sessionID like the footer)", () => {
+    const sessions: Record<string, any> = {
+      ses_child: { id: "ses_child", metadata: { workflowRunId: "wf_a", parentSessionID: S } },
+      [S]: { id: S },
+    }
+    expect(viewedSession("ses_child", (id) => sessions[id])).toBe(S)
+    expect(viewedSession(S, (id) => sessions[id])).toBe(S)
+    expect(viewedSession(undefined, (id) => sessions[id])).toBeNull()
+    const src = readFileSync(join(root, "src", "tui", "index.tsx"), "utf8")
+    expect(src).toMatch(/append: "sidebar\.content"/)
+    expect(readFileSync(join(root, "src", "tui", "sidebar.tsx"), "utf8")).toMatch(/sidebarSummary\(/)
   })
 })
 

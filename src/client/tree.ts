@@ -510,6 +510,90 @@ export function pickerAction(s: TreeStore, value: PickerValue, key: PickerKey): 
   return actionFor(row, PICKER_ROW_KEY[key]) ?? { type: "toast", message: `#${agent.index} is ${agent.status}`, variant: "info" }
 }
 
+// ---- sidebar summary (X26) -----------------------------------------------------------------------
+
+/** How a sidebar row is colored: by run status. */
+export type SidebarTone = "running" | "paused" | "success" | "error" | "muted"
+
+export interface SidebarItem {
+  runId: string
+  /** The workflow name, shortened to SIDEBAR_NAME_CELLS. */
+  name: string
+  /** `<done>/<total>` agents. */
+  progress: string
+  /** Muted sub-line: active `[paused · ]<phase> · <n> running · <tokens> · $<cost>`, finished `<status> · <tokens> · $<cost>`. */
+  detail: string
+  tone: SidebarTone
+}
+
+export interface SidebarSummary {
+  /** Collapsed header hint: `1 running · $0.42` (`n paused`, or `n runs` when none is active). */
+  hint: string
+  /** Up to SIDEBAR_ITEMS runs: active newest first, then the newest finished. */
+  items: SidebarItem[]
+  /** Runs not listed (`+n more`). */
+  more: number
+  total: number
+  /** More than 2 runs: the header toggles the list. */
+  collapsible: boolean
+}
+
+export const SIDEBAR_ITEMS = 3
+export const SIDEBAR_NAME_CELLS = 24
+
+const TONE: Record<string, SidebarTone> = { running: "running", paused: "paused", completed: "success", failed: "error" }
+
+function clipName(s: string, n: number): string {
+  const chars = [...s]
+  return chars.length <= n ? s : `${chars.slice(0, n - 1).join("")}…`
+}
+
+/** The phase a run is in: the last one with running agents, else the first unfinished one. */
+function currentPhase(r: RunView): string | null {
+  const running = r.phases.filter((p) => p.running > 0)
+  if (running.length) return running[running.length - 1]!.title
+  return r.phases.find((p) => p.done < p.agents)?.title ?? null
+}
+
+/** The `sidebar.content` summary of one session's runs; null (hidden) when it has none. */
+export function sidebarSummary(runs: RunView[], sessionID: string | null | undefined): SidebarSummary | null {
+  if (!sessionID) return null
+  const mine = runs.filter((r) => r.parentSessionID === sessionID)
+  if (!mine.length) return null
+  const byNew = (a: RunView, b: RunView) => b.startedAt - a.startedAt || (a.runId < b.runId ? 1 : -1)
+  const ordered = [...mine.filter(isActive).sort(byNew), ...mine.filter((r) => !isActive(r)).sort(byNew)]
+  const running = mine.filter((r) => r.status === "running").length
+  const paused = mine.filter((r) => r.status === "paused").length
+  const counts = [running ? `${running} running` : "", paused ? `${paused} paused` : ""].filter(Boolean)
+  if (!counts.length) counts.push(`${mine.length} run${mine.length === 1 ? "" : "s"}`)
+  const cost = mine.reduce((n, r) => n + (r.cost || 0), 0)
+  const items = ordered.slice(0, SIDEBAR_ITEMS).map((r): SidebarItem => {
+    const usage = [formatTokens(r.tokens), formatCost(r.cost)]
+    const detail = isActive(r)
+      ? [r.status === "paused" ? "paused" : "", currentPhase(r) ?? "", r.agents.running ? `${r.agents.running} running` : "", ...usage]
+      : [r.status, ...usage]
+    return {
+      runId: r.runId,
+      name: clipName(r.workflowName || r.runId, SIDEBAR_NAME_CELLS),
+      progress: `${r.agents.done}/${r.agents.total}`,
+      detail: detail.filter(Boolean).join(" · "),
+      tone: TONE[r.status] ?? "muted",
+    }
+  })
+  return {
+    hint: [...counts, formatCost(cost)].join(" · "),
+    items,
+    more: Math.max(0, ordered.length - SIDEBAR_ITEMS),
+    total: ordered.length,
+    collapsible: ordered.length > 2,
+  }
+}
+
+/** The session whose runs a slot shows for `sessionID`: a workflow child shows its parent's. */
+export function viewedSession(sessionID: string | null | undefined, getSession: (id: string) => SessionLike | undefined): string | null {
+  return sessionID ? targetFor({ type: "session", sessionID }, getSession, "").sessionID : null
+}
+
 // ---- Location target -----------------------------------------------------------------------------
 
 export type Route = { type: "home" } | { type: "session"; sessionID: string } | { type: string; [k: string]: unknown }

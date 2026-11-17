@@ -28,9 +28,12 @@ export {
   progressText,
   rowsFor,
   runKey,
+  SIDEBAR_ITEMS,
+  sidebarSummary,
   STATUS_ICON,
   targetFor,
   TreeStore,
+  viewedSession,
   type Action,
   type ControlRequest,
   type Expanded,
@@ -42,6 +45,9 @@ export {
   type Route,
   type Row,
   type SessionLike,
+  type SidebarItem,
+  type SidebarSummary,
+  type SidebarTone,
 } from "../client/tree.ts"
 
 // ---- fitting text to a width ---------------------------------------------------------------------
