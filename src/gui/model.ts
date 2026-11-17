@@ -256,7 +256,9 @@ export function rowText(row: Row, now: number = Date.now()): RowTextView {
     if (p.tokens) parts.push(formatTokens(p.tokens))
     if (p.elapsedMs !== null && p.elapsedMs !== undefined) parts.push(formatDuration(p.elapsedMs))
     if (p.model) parts.unshift(p.model)
-    return { glyph: p.running ? STATUS_ICON.running! : p.done >= p.agents ? STATUS_ICON.completed! : STATUS_ICON.queued!, title: row.title, detail: parts.join(" · "), depth: 1 }
+    // A declared phase is listed before its first agent starts (0/0): that is pending, not done.
+    const done = p.agents > 0 && p.done >= p.agents
+    return { glyph: p.running ? STATUS_ICON.running! : done ? STATUS_ICON.completed! : STATUS_ICON.queued!, title: row.title, detail: parts.join(" · "), depth: 1 }
   }
   const a = row.agent
   const parts: string[] = [a.status]

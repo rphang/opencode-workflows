@@ -10,6 +10,11 @@ may contain breaking changes.
 
 ### Fixed
 
+- Desktop app tree panel: a declared phase whose agents have not started (`0/0`) showed ✓; it now
+  shows the queued glyph ◌. Seen live in the macOS desktop app 2.3.0.
+- Desktop app tree panel: it opens 420 px wide instead of the narrowest side width, where agent rows
+  cut off their model, and the scope switch sits at the end of its own row instead of wrapping its
+  label and description side by side.
 - TUI agent dialog (`ctrl+x j`): each row's description is now `status · phase`. With the model
   appended, opencode's dialog cut the line without an ellipsis and the model showed as `open` (seen
   live on opencode 2.3.0). The tree rows still show each agent's model.

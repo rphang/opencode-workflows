@@ -52,8 +52,14 @@ export function TreePanel(props: TreePanelProps): JSX.Element {
         "font-variant-numeric": "tabular-nums",
       }}
     >
-      <div style={{ padding: "2px 4px 8px" }}>
-        <ui.Switch label={props.t("panel.scope")} description={props.t("panel.scope.description")} checked={props.all()} onChange={props.setAll} />
+      {/* The panel lays out the scope row itself: the host's Switch puts its label and description side
+          by side, which wraps both in a side panel. */}
+      <div style={{ display: "flex", "align-items": "center", gap: "8px", padding: "2px 4px 8px" }}>
+        <div style={{ display: "flex", "flex-direction": "column", "min-width": "0", flex: "1 1 auto" }}>
+          <span>{props.t("panel.scope")}</span>
+          <span style={{ ...muted, "font-size": "12px" }}>{props.t("panel.scope.description")}</span>
+        </div>
+        <ui.Switch label={props.t("panel.scope")} hideLabel checked={props.all()} onChange={props.setAll} />
       </div>
       <Show when={props.line()}>
         <div style={{ ...muted, padding: "4px" }}>{props.line()}</div>

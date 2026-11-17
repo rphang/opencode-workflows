@@ -346,7 +346,9 @@ export function setup(ctx: Context): void {
   ctx.add(Panel, {
     id: PANEL_ID,
     region: "side",
-    width: "narrow",
+    // Wide enough for an agent row's detail with its model and four buttons; at `narrow` the model
+    // is cut off. The user can still drag the region, and the host remembers that width.
+    width: 420,
     mobile: {
       get title() {
         return ctx.t("panel.mobile")
