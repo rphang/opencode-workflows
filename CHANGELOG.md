@@ -8,6 +8,8 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
 ### Added
 
 - **Steering at the idle boundary** (opencode 2.3+, X22). A message to an agent that is finishing
@@ -267,6 +269,7 @@ Compared with Claude Code (details and status per item in `docs/PARITY.md`):
   `opencode serve`. After a hard crash, suspended child sessions and `wf-<runId>-<i>` worktrees are
   not cleaned up automatically.
 
-[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rphang/opencode-workflows/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rphang/opencode-workflows/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rphang/opencode-workflows/releases/tag/v0.1.0
