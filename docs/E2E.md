@@ -163,6 +163,29 @@ console size). Seen: the rows showed `opencode/space-bunny-free#low` and the oth
 `agents/<i>.json` recorded the same `model`, the unlabeled phase listed its agents' models, and at
 120 columns the agent models lost their provider first.
 
+### On Linux (0.3.0 screenshots)
+
+The 0.3.0 README images (`live-tree-running`, `-agent-dialog`, `-sidebar`, `-steer`, `-stop`,
+`-open-agent`) were taken on opencode 2.3.0 without a desktop:
+
+1. `npm run build`. Put the sandbox under `.sandbox/<name>/` (`XDG_*`, `OPENCODE_TEST_HOME`, a
+   `package.json` with another name at its root) with `opencode.json`
+   `{"plugins":["file:///<repo>"],"model":"opencode/deepseek-v4.1-flash-free"}`. Use a git project in
+   a short path outside the repo with the `slow_step` plugin and the five-agent script above.
+2. Start the TUI in a fixed-size tmux pane with truecolor: a tmux config with
+   `set -g default-terminal "tmux-256color"` and `set -as terminal-overrides ",*:RGB"`, then
+   `tmux -L shots -f <conf> new-session -d -s s -x 180 -y 48 "<launch.sh>"`, where the launch script
+   exports the sandbox env and `COLORTERM=truecolor` and runs `opencode2 <project>`.
+3. Drive it with `tmux -L shots send-keys -t s -l '<text>'`, `Enter`, `C-x o` (panel), `C-x j`
+   (agent dialog), `C-d` (stop), `Down`. Capture with `tmux -L shots capture-pane -p -e -t s`
+   (24-bit SGR escapes), convert the escapes to an HTML `<pre>` (JetBrains Mono, 13.5 px, background
+   `#0a0a0a`) and screenshot the `<pre>` with Playwright's Chromium at device scale factor 1.
+4. The TUI starts a background `opencode serve --service`: when done, kill the tmux server and only
+   the service whose environment points at your sandbox.
+
+Free models have a daily quota (`provider.free-limit`); one demo run used most of it, and the last
+agent failed with that error. The finished-run image therefore stays the 2.0.15 one.
+
 ## What is covered (live)
 
 

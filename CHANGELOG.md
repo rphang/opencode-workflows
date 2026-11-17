@@ -8,6 +8,18 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- TUI agent dialog (`ctrl+x j`): each row's description is now `status · phase`. With the model
+  appended, opencode's dialog cut the line without an ellipsis and the model showed as `open` (seen
+  live on opencode 2.3.0). The tree rows still show each agent's model.
+
+### Docs
+
+- README screenshots retaken on opencode 2.3.0 (running tree, steering, stop, steered agent session)
+  plus two new ones: the agent dialog and the sidebar section. `docs/E2E.md` describes the Linux
+  (tmux) capture recipe.
+
 ## [0.3.0] - 2026-11-17
 
 ### Added

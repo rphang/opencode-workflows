@@ -323,9 +323,10 @@ an extension: Claude Code's workflows do not have it.
 
 Or ask the model ("tell the researchers to prefer primary sources"): it calls `workflow_control`
 with `action: "message"`. The model only does this when you ask, and only for its own session's runs.
-In the TUI, select an agent in the [live progress tree](#live-progress-tree-tui) and press `m`:
+In the TUI, select an agent in the [live progress tree](#live-progress-tree-tui) and press `m`, or
+pick it in the agent dialog (`ctrl+x j`) and press Enter:
 
-![The live tree's message dialog, sending "Also end your reply with STEERED-OK." to the running agent #4 slow listener](docs/assets/live-tree-steer.png)
+![The message dialog for the running agent #4 slow listener, with the text "Also end your reply with STEERED-OK."; the tree behind it shows both slow agents on slow_step call 6](docs/assets/live-tree-steer.png)
 
 | Target | Meaning |
 |---|---|
@@ -360,7 +361,7 @@ How it behaves:
 In the terminal UI, the plugin adds a live, interactive view of your workflow runs. This is an
 extension beyond Claude Code's workflow tool.
 
-![The live progress tree next to a session: the Scan phase lists the models its agents use, the Report phase shows its meta model label, and each agent row shows the model it runs on (one with the #low effort variant, one on another model) while two agents run slow_step tool calls](docs/assets/live-tree-running.png)
+![The live progress tree next to a session on opencode 2.3.0: the Scan phase lists the models its agents use, the Report phase shows its meta model label, and each agent row shows the model it runs on (one with the #low effort variant, one on opencode/glm-5.3-flash-free) while two agents run slow_step tool calls](docs/assets/live-tree-running.png)
 
 - **Footer.** While a run of the current session is active, the prompt footer shows
   `wf <name> <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). The home screen
@@ -376,7 +377,7 @@ extension beyond Claude Code's workflow tool.
   and elapsed time always stay. The footer likewise shortens only the workflow name.
   ![The tree in a 120-column terminal: the run id is gone; on the rows that don't fit, the agent model loses its provider and is shortened along with the activity, while status, tokens and time stay; #3 was stopped](docs/assets/live-tree-narrow.png)
 - **Models.** Each agent row shows the model the agent runs on, as `provider/model#variant`:
-  `opencode/space-bunny-free#low` is the parent's model with `effort: 'low'`, and an agent with its
+  `opencode/deepseek-v4.1-flash-free#low` is the parent's model with `effort: 'low'`, and an agent with its
   own `model` shows that model. It is the model opencode reports for the agent's session, so if
   opencode falls back to another model, the row shows it (and the agent gets a warning). A phase
   shows its `meta.phases[].model` label when the script declares one, and otherwise the models its
@@ -411,21 +412,27 @@ or run id. Then:
 | `ctrl+d` | stop the agent, after a confirmation |
 | `ctrl+o` | open the agent's session (in a tab when tabs are on) |
 
+![The agent dialog over a running workflow: a search line, the two running agents #3 slow stepper and #4 slow listener with their status and phase, and the actions urgent steer ctrl+u, stop ctrl+d, open ctrl+o](docs/assets/live-tree-agent-dialog.png)
+
 **Sidebar.** When the session has runs, the session sidebar gets a **Workflows** section under
 opencode's own: up to three runs (running ones first) with a colored status dot, `done/total`, and a
 line with the current phase, running agents, tokens and cost. Click a run to open the panel on it.
 With more than two runs, click the header to fold the section (it stays folded across restarts and
 then shows `(1 running · $0.42)`).
 
+![The session sidebar under Context: a Workflows section with live-tree-demo at 3/5 and the line "Scan · 2 running · 28.5k · $0", while the prompt footer shows the same run](docs/assets/live-tree-sidebar.png)
+
 Right after opencode starts, the plugins may still be loading: the panel says `loading…` and the tree
 retries for a few seconds before it reports that the workflows RPC is unavailable.
 
-| Opening an agent (Enter) | Stopping it (`x`, then confirm) | Finished, with the notification |
+| Opening an agent (Enter) | Stopping it (`x`, or `ctrl+d` in the agent dialog, then confirm) | Finished, with the notification |
 |---|---|---|
-| ![The steered agent's child session: the workflow message arrives between two slow_step calls and its reply ends with STEERED-OK; the tree still tracks the parent run](docs/assets/live-tree-open-agent.png) | ![The stop confirmation for #3 slow stepper](docs/assets/live-tree-stop.png) | ![The parent session answers the task notification; the tree shows the finished run with one stopped and one steered agent](docs/assets/live-tree-done.png) |
+| ![The steered agent's child session: the workflow message arrives between its slow_step calls and its reply ends with STEERED-OK; the sidebar's Workflows section still shows the parent's run](docs/assets/live-tree-open-agent.png) | ![The stop confirmation for #3 slow stepper, opened from the agent dialog](docs/assets/live-tree-stop.png) | ![The parent session answers the task notification; the tree shows the finished run with one stopped and one steered agent](docs/assets/live-tree-done.png) |
 
-The TUI screenshots come from opencode 2.0.15 in Windows conhost, with free `opencode/*` models
-(the parent on `opencode/space-bunny-free`) and a demo tool, `slow_step`, that takes 4 s per call.
+The TUI screenshots come from opencode 2.3.0 in a Linux terminal (tmux, 180×48), with free
+`opencode/*` models (the parent on `opencode/deepseek-v4.1-flash-free`) and a demo tool,
+`slow_step`, that takes 4 s per call. The narrow-panel and finished-run images are from the same
+demo on opencode 2.0.15 in Windows conhost.
 
 **Notifications.** When a run finishes while the terminal is not focused, the TUI sends a desktop
 notification if you enabled opencode's attention notifications in `cli.json` (next to your
