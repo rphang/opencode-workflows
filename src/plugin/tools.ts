@@ -169,9 +169,15 @@ export function stripWrappingFence(text: string): string {
   return m ? m[1]! : text
 }
 
-async function launchResult(host: WorkflowHost, input: WorkflowToolInput, tctx: { sessionID: unknown; agent?: unknown }) {
+async function launchResult(
+  host: WorkflowHost,
+  input: WorkflowToolInput,
+  tctx: { sessionID: unknown; agent?: unknown; messageID?: unknown; id?: unknown },
+) {
   const agent = typeof tctx.agent === "string" && tctx.agent ? tctx.agent : undefined
-  const out = await host.launch(input, String(tctx.sessionID), { agent })
+  // The tool call a scriptPath approval prompt belongs to (P76).
+  const call = typeof tctx.messageID === "string" && typeof tctx.id === "string" ? { messageID: tctx.messageID, id: tctx.id } : undefined
+  const out = await host.launch(input, String(tctx.sessionID), { agent, call })
   return { content: JSON.stringify(out, null, 2), metadata: { ...out } }
 }
 

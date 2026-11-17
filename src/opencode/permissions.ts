@@ -3,9 +3,9 @@
 // means "ask"; core/src/util/wildcard.ts `match`). A session's effective rules are its agent's rules
 // followed by the session's own `permissions` (docs/OPENCODE-API-NOTES.md "Permissions").
 //
-// Plugins cannot call opencode's permission.assert (it would need a tool invocation to ask the
-// user), so the plugin evaluates the rules itself and treats "ask" as "not allowed" wherever it
-// cannot ask (fail closed), except where noted by the caller.
+// Where the plugin cannot ask (opencode before 2.3.0 has no ctx.permission.assert; see
+// permission-assert.ts for where it now asks), it evaluates the rules itself and treats "ask" as
+// "not allowed" (fail closed), except where noted by the caller.
 
 import type { Plugin } from "@opencode/plugin"
 

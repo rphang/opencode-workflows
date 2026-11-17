@@ -6,6 +6,7 @@
 import { realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path"
+import { isPermissionDecline, type AssertPermission } from "../opencode/permission-assert.ts"
 import { evaluatePermission, type PermissionRule } from "../opencode/permissions.ts"
 import {
   getActiveRun,
@@ -112,6 +113,12 @@ export interface HostOptions {
    * Default: no rules, so only paths inside the project / run store / saved-workflow dirs are read.
    */
   permissionRules?: (sessionID: string, agent?: string) => Promise<PermissionRule[]>
+  /**
+   * opencode's own permission check (`ctx.permission.assert`, 2.3.0): when given, a scriptPath that the
+   * rules above neither allow nor deny goes through it, with opencode's prompt for a `workflow` tool call
+   * (P76) and without one for workflow() inside a running script. Absent: "ask" counts as refused.
+   */
+  assertPermission?: AssertPermission
   /** Receives every engine event of every run this host starts (the live tree, X12/X13). */
   onEvent?: (event: WorkflowEvent) => void
   /** Live activity of a run's running agents (X11), shown by the status views. */
@@ -234,8 +241,16 @@ export class WorkflowHost {
 
   // ---- launch ---------------------------------------------------------------------------------
 
-  /** `caller.agent` is the parent's current agent (tool ctx.agent): children inherit it (P61). */
-  async launch(input: WorkflowToolInput, sessionID: string, caller: { agent?: string } = {}): Promise<WorkflowOutput> {
+  /**
+   * `caller.agent` is the parent's current agent (tool ctx.agent): children inherit it (P61).
+   * `caller.call` is the tool call (ctx.messageID / ctx.id): a scriptPath approval prompt is shown with
+   * it (P76), and a user's plain rejection of that prompt is rethrown so opencode ends the step.
+   */
+  async launch(
+    input: WorkflowToolInput,
+    sessionID: string,
+    caller: { agent?: string; call?: { messageID: string; id: string } } = {},
+  ): Promise<WorkflowOutput> {
     const store = this.opts.store
     const runId = store.newRunId()
     const taskId = `task_${runId.slice(3)}`
@@ -253,8 +268,9 @@ export class WorkflowHost {
     let givenPath: string | undefined
     if (nonEmpty(input.scriptPath)) {
       try {
-        givenPath = await this.authorizeScriptPath(input.scriptPath, sessionID, caller.agent)
+        givenPath = await this.authorizeScriptPath(input.scriptPath, sessionID, caller.agent, caller.call)
       } catch (e) {
+        if (isPermissionDecline(e)) throw e
         return fail(errMsg(e))
       }
       try {
@@ -391,10 +407,14 @@ export class WorkflowHost {
    * UNC and device paths are refused outright (opening one can reach a remote SMB host). A path whose
    * real location (symlinks resolved) is outside the project directory, this session's run store and
    * the personal workflows dir needs an `external_directory` allow rule for its directory; any path
-   * whose `read` rule is deny is refused. Plugins cannot ask the user, so "ask" counts as refused.
-   * Returns the absolute path as given (P04 keeps it; its real target is what was checked); throws with the reason otherwise.
+   * whose `read` rule is deny is refused. With `assertPermission` (opencode 2.3.0) what the rules leave
+   * open goes through opencode's own check: saved approvals, evaluate hooks and, for a tool call
+   * (`call`), its approval prompt; the rule spelling that matched is the resource asked about. Without
+   * it the plugin cannot ask, so an external_directory "ask" counts as refused.
+   * Returns the absolute path as given (P04 keeps it; its real target is what was checked); throws with
+   * the reason otherwise (a user's plain rejection of a tool call's prompt is rethrown as is).
    */
-  private async authorizeScriptPath(given: string, sessionID: string, agent?: string): Promise<string> {
+  private async authorizeScriptPath(given: string, sessionID: string, agent?: string, call?: { messageID: string; id: string }): Promise<string> {
     const raw = given.trim()
     const isUnc = (p: string) => /^[\\/]{2}/.test(p)
     if (isUnc(raw)) throw new Error(`scriptPath ${raw} is a UNC or device path; only local files can be run`)
@@ -434,18 +454,42 @@ export class WorkflowHost {
     const sameDir = contains(await realpathOr(givenDir), dirname(real)) && contains(dirname(real), await realpathOr(givenDir))
     const dirSpellings = sameDir && givenDir !== dirname(real) ? [dirname(real), givenDir] : [dirname(real)]
     const fileSpellings = dirSpellings.map((d) => join(d, basename(real)))
-    if (!internalRoot && !isTrusted) {
-      const allowed = dirSpellings.some((d) => evaluatePermission("external_directory", slash(join(d, "*")), rules) === "allow")
-      if (!allowed) {
-        throw new Error(
-          `scriptPath ${raw} is outside the project directory (${this.opts.cwd}) and opencode's external_directory ` +
-            `permission does not allow ${dirname(real)}. Copy the script into the project, or allow that directory.`,
+    const assert = this.opts.assertPermission
+    /** opencode's own check of one resource; a refusal becomes `refused(reason)`. */
+    const ask = async (action: string, resource: string, save: string, refused: (reason: string) => string): Promise<void> => {
+      try {
+        await assert!(
+          { sessionID, agent, action, resources: [resource], save: [save], ...(call ? { source: { type: "tool", ...call } } : {}) },
+          { interactive: !!call },
         )
+      } catch (e) {
+        if (isPermissionDecline(e)) {
+          if (call) throw e
+          throw new Error(refused("the request was rejected"))
+        }
+        throw new Error(refused(errMsg(e)))
+      }
+    }
+    if (!internalRoot && !isTrusted) {
+      const outside = `scriptPath ${raw} is outside the project directory (${this.opts.cwd}) and opencode's external_directory permission`
+      const effects = dirSpellings.map((d) => evaluatePermission("external_directory", slash(join(d, "*")), rules))
+      const allowedAt = effects.indexOf("allow")
+      if (allowedAt < 0 && (!assert || effects.includes("deny"))) {
+        throw new Error(`${outside} does not allow ${dirname(real)}. Copy the script into the project, or allow that directory.`)
+      }
+      if (assert) {
+        const dir = slash(join(dirSpellings[Math.max(allowedAt, 0)]!, "*"))
+        await ask("external_directory", dir, dir, (reason) => `${outside} refused ${dirname(real)}: ${reason}. Copy the script into the project, or allow that directory.`)
       }
     }
     const readResources = internalRoot ? [slash(relative(internalRoot, real) || ".")] : fileSpellings.map(slash)
-    if (readResources.some((r) => evaluatePermission("read", r, rules) === "deny")) {
+    const readEffects = readResources.map((r) => evaluatePermission("read", r, rules))
+    if (readEffects.includes("deny")) {
       throw new Error(`scriptPath ${raw} is denied by opencode's read permission`)
+    }
+    if (assert) {
+      const resource = readResources[Math.max(readEffects.indexOf("allow"), 0)]!
+      await ask("read", resource, "*", (reason) => `scriptPath ${raw} is denied by opencode's read permission: ${reason}`)
     }
     return abs
   }

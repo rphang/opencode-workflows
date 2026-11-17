@@ -7,6 +7,7 @@ import type { Plugin } from "@opencode/plugin"
 import { listWorkflows, personalWorkflowsDir, projectWorkflowDirs, type RegistryOptions } from "../registry.ts"
 import { createOpencodeRunner } from "../opencode/runner.ts"
 import { createFreeformToolFilter } from "../opencode/freeform.ts"
+import { createPermissionAsserter, createUnattendedAskGuard } from "../opencode/permission-assert.ts"
 import { createChildAskGuard, effectiveSessionRules } from "../opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, type SubmitRegistry } from "../opencode/submit.ts"
 import { RunStore } from "../store.ts"
@@ -121,6 +122,9 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     control: rpcControlEnabled(env, options),
   })
 
+  // P76 (opencode 2.3.0): scriptPath approvals through opencode's own permission check and prompt.
+  const assertPermission = createPermissionAsserter(ctx)
+
   const host = new WorkflowHost({
     cwd,
     store,
@@ -142,6 +146,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     // P76: scriptPath reads honour the caller's read/external_directory rules, like opencode's read tool.
     projectRoots: projectRoot(ctx),
     permissionRules: (sessionID, agent) => effectiveSessionRules(ctx, sessionID, agent),
+    assertPermission,
     onEvent: live.onEvent,
     activity: live.activityFor,
   })
@@ -178,6 +183,8 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
         editor.add(createSubmitTool(submitRegistry))
       }),
     )
+    // P76: scriptPath checks made outside a tool call (workflow() in a running script) never prompt.
+    if (assertPermission) registrations.push(await ctx.permission.hook("evaluate", createUnattendedAskGuard()))
     // X24: models that cannot send freeform text would only see a JSON duplicate of `workflow {script}`.
     if (freeform && typeof (ctx.session as any).hook === "function") {
       registrations.push(await ctx.session.hook("context", createFreeformToolFilter(ctx, SCRIPT_TOOL_NAME)))

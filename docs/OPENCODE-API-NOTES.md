@@ -40,8 +40,19 @@ the 2.3.0 packages and `tsc` is clean against their types.
   (`core/session/runner/llm.ts`; `/goal` uses it). On 2.0.15 registering the name succeeds and never fires.
 - **Location eviction:** `LocationActivity` no longer evicts a location with an active execution or
   background job (#57416); `experimental.location_idle_timeout` overrides the 60-minute timeout.
-- **`ctx.permission.assert({sessionID, action, resources, ...})`** asks through the native prompt and
-  honours saved approvals (#54930). Evaluation order is unchanged.
+- **`ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})`** asks
+  through the native prompt and honours saved approvals (#54930). Evaluation order is unchanged:
+  configured deny (agent rules, then session rules; an unknown agent denies everything), then saved
+  approvals, then the `permission.evaluate` hooks (they see `metadata`). A deny, a hook's deny or a
+  rejection with feedback rejects with a `Tool.Error` (`_tag: "Tool.Error"`, `message`); a plain
+  rejection rejects with the `Permission.DeclinedError` defect (`_tag: "Permission.DeclinedError"`),
+  which a tool must rethrow so the step ends. `source: {type:"tool", messageID, id}` ties the prompt
+  to a tool call. There is no abort signal: a pending prompt stays until answered. P76 uses it.
+- **Session `context` hook** (`ctx.session.hook("context", cb)`): runs before each primary model
+  request with `{sessionID, agent, model: {providerID, id, variant?}, system, messages, options,
+  tools: {[name]: {description, input}}}` (a copy); deleting a `tools` key drops that tool from the
+  request (core/src/session/model-request.ts). X24 uses it with `ctx.model.list()`'s
+  `capabilities.freeform`, the field core checks before it sends a tool's freeform encoding.
 - **`ctx.vcs.status` still ignores the location**; keep the git shell-out.
 - **Freeform tool input** (#61703): `freeform: {type:"text"}` on a tool whose input schema has exactly
   one property (a required string) lets models whose models.dev capabilities list it send raw text.

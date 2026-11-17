@@ -528,7 +528,7 @@ opencode never shows their permission prompts. Upstream work to expose this:
 | P72 | Plugin-namespaced workflows | N/A | opencode plugins cannot ship `workflows/` folders for other plugins. |
 | P73 | Restart one agent | DEGRADED | Use `stop_agent`, or stop the run and resume it. |
 | P74 | Open an agent's transcript | DEGRADED | Open its tagged child session. `agents/<i>.json` holds its `sessionID`. |
-| P76 | `scriptPath` permission checks | DEGRADED | An "ask" counts as refused. |
+| P76 | `scriptPath` permission checks | DEGRADED | A `workflow` call asks through opencode's own prompt. `workflow({scriptPath})` inside a running script never asks: there an "ask" counts as refused. |
 | P79 | Per-agent results named in the notification | ADAPTED | Claude Code points at `journal.jsonl`. Here `<diagnostics>` points at `workflow_control` `result`, because the run store is outside the project (a permission prompt per read) and opencode's `read` cuts long lines. |
 
 Also:
@@ -570,8 +570,11 @@ Also:
   `agentType`, the parent agent's deny and ask rules are added on top. In every child, `workflow`,
   `workflow_control`, `workflow_submit` and `question` are denied, and any "ask" becomes "deny".
 - **`scriptPath` reads only files you could read anyway**: the project, this session's runs and the
-  personal workflows directory, plus directories an `external_directory` allow rule covers. Symlinks
-  are resolved first, `read` deny rules apply, and UNC or device paths are refused.
+  personal workflows directory, plus directories your `external_directory` rules allow. Anything else
+  raises opencode's usual approval prompt on the `workflow` tool call (opencode 2.3+), where "always"
+  is saved as usual. A `workflow({scriptPath})` call inside a running script never prompts: it needs a
+  rule or a saved approval. Symlinks are resolved first, `read` rules apply, and UNC or device paths
+  are refused.
 - **Runs are private to their session.** Another session's run id answers "not found". This covers
   `workflow_control` `result` too: the parent model sees its own runs' agent outputs, and workflow
   agents cannot call it.

@@ -30,7 +30,7 @@ deciding the next.
 - \`scriptPath\`: re-run a persisted (possibly edited) script. Takes precedence over \`script\` and \`name\`.
   To iterate, edit that file and re-invoke with \`{scriptPath}\` instead of resending the whole script.
   Only local files are read: inside the project, the run's own copy, the personal workflows dir, or a
-  directory opencode's \`external_directory\` permission allows; UNC paths are refused.
+  directory opencode's \`external_directory\` permission allows (the user may be asked); UNC paths are refused.
 - \`name\`: run a saved or bundled workflow by its \`meta.name\`.
 - \`args\`: any JSON value, exposed verbatim as the global \`args\` (\`undefined\` when omitted). Pass arrays
   and objects as real JSON values — \`args: ["a.ts", "b.ts"]\`, NOT \`args: "[\\"a.ts\\"]"\` (a stringified

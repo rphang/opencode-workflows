@@ -55,7 +55,7 @@ and include the run's `run.json` and `journal.jsonl`. They are in the run's tran
 | `export const meta must be the first statement` or a meta error | `meta` must come first and be a pure literal: no variables, calls, spreads or template interpolation. |
 | A syntax error on a type annotation | Scripts are plain JavaScript, not TypeScript. |
 | `Date.now() is not available in workflow scripts` (or `Math.random()`, or `new Date()`) | These would break resume. Pass timestamps in through `args`, and vary prompts by index instead of randomness. |
-| `scriptPath ... is outside the project directory` or `... is denied by opencode's read permission` | The file is outside the allowed locations (see the [security model](../README.md#security-model)). Add an `external_directory` allow rule for its directory, copy the script into the project, or pass it inline. |
+| `scriptPath ... is outside the project directory` or `... is denied by opencode's read permission` | The file is outside the allowed locations (see the [security model](../README.md#security-model)), a rule denies it, or the approval prompt was answered with a rejection. Inside a running script (`workflow({scriptPath})`) nothing can prompt, so an approval is needed beforehand. Add an `external_directory` allow rule for its directory (or approve it with "always" on a `workflow` tool call), copy the script into the project, or pass it inline. |
 | A saved workflow doesn't show up as `/<name>` | Its `meta` is not a pure literal, so it is not registered. Check the file in `.opencode/workflows/` or `~/.config/opencode/workflows/`. |
 
 ## `/deep-research`
