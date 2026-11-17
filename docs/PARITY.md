@@ -147,7 +147,7 @@ Design: [`docs/design/steering-and-live-tree.md`](design/steering-and-live-tree.
 
 ## Test evidence
 
-`npm run test:parity` (`bun test tests/parity`) runs 334 tests in 15 files, and all pass. They
+`npm run test:parity` (`bun test tests/parity`) runs 335 tests in 15 files, and all pass. They
 enter at the highest level possible: the plugin's `setup()` over a fake opencode v2 Context
 (`tests/helpers/plugin-harness.ts`), then the `workflow` and `workflow_control` tools
 (`execute`), the slash commands, and the `<task-notification>` delivered through

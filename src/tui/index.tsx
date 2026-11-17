@@ -7,11 +7,15 @@
 //   events delta / finished          → one global stream, filtered here by Location and session
 //
 // Surfaces: the prompt footer (`wf <name> 7/12 · 81.2k · $0.42`), the home footer (`wf 2 running`), a
-// session panel "workflows" with the tree (<leader>o, /wf), <leader>j to message an agent, and a
-// desktop notification (or a toast) when a run finishes. If the RPC is unavailable (plugin disabled,
-// older opencode) it stays silent; /workflows keeps working.
+// session panel "workflows" with the tree (<leader>o, /wf), the agent dialog (<leader>j, X25), a
+// sidebar summary (X26), and a desktop notification (or a toast) when a run finishes. If the RPC is
+// unavailable (plugin disabled) it retries a few times (X27), then stays quiet; /workflows keeps working.
+//
+// The host-agnostic state and sync live in src/client/ (shared with a GUI companion); this file only
+// wires them to the opencode 2.3 TUI plugin API (@opencode/plugin/tui, types only: the host provides it).
 
-import { createMemo, createSignal, Show } from "solid-js"
+import type { Plugin } from "@opencode/plugin/tui"
+import { createEffect, createMemo, createRoot, createSignal, Show, untrack } from "solid-js"
 import { TreeSync } from "../client/sync.ts"
 import { definition } from "../plugin/rpc-def.ts"
 import { Panel } from "./panel.tsx"
@@ -55,7 +59,7 @@ function clip(s: string, n = 400): string {
 
 const plugin = {
   id: "dynamic-workflows.tui",
-  setup(ctx: any) {
+  setup(ctx: Plugin.Context) {
     const rpc = ctx.client.rpc(definition)
     const tree = new TreeStore()
     const [version, setVersion] = createSignal(0)
@@ -98,18 +102,25 @@ const plugin = {
     const offPlugins = ctx.data?.on?.("plugin.updated", () => void sync.refresh())
     if (typeof offPlugins === "function") cleanups.push(offPlugins)
 
-    // Resync when the viewed session (and so the target) or the scope changes, and periodically
-    // while a run is active (missed events, reconnects).
-    const watchTarget = setInterval(() => sync.checkTarget(), 500)
+    // Resync when the viewed session (and so the target) or the scope changes: the router's route and
+    // the session data are Solid stores in opencode 2.3 (route.tsx createStore/reconcile, the client's
+    // data store), so an effect over filter() sees every change. Its own root: setup has no owner.
+    createRoot((dispose) => {
+      cleanups.push(dispose)
+      createEffect(() => {
+        filter()
+        untrack(() => sync.checkTarget())
+      })
+    })
+    // Periodically while a run is active (missed events, reconnects).
     const periodic = setInterval(() => {
       if ([...tree.runs.values()].some(isActive)) void resync()
     }, RESYNC_MS)
     const ticker = setInterval(() => {
       if ([...tree.runs.values()].some(isActive)) setNow(Date.now())
     }, TICK_MS)
-    for (const t of [watchTarget, periodic, ticker]) (t as any).unref?.()
+    for (const t of [periodic, ticker]) (t as { unref?: () => void }).unref?.()
     cleanups.push(() => {
-      clearInterval(watchTarget)
       clearInterval(periodic)
       clearInterval(ticker)
     })
@@ -130,7 +141,8 @@ const plugin = {
 
     const control = async (req: ControlRequest) => {
       try {
-        const res = await rpc.control(req, location())
+        // The output schema is a plain object; the handler answers {ok, message} (src/plugin/rpc-def.ts).
+        const res = (await rpc.control(req, location())) as { ok?: boolean; message?: string } | undefined
         toast(String(res?.message ?? "done"), res?.ok ? "success" : "warning", "Workflows")
       } catch (e) {
         toast(errText(e), "error", "Workflows")
@@ -222,6 +234,33 @@ const plugin = {
       if (picked) await runAction(pickerAction(tree, picked, "steer"))
     }
 
+    // ---- global commands ----------------------------------------------------------------------
+
+    // A setup-time layer (opencode 2.3 registers it for the plugin's lifetime; it used to need an
+    // `app` slot render that returned null).
+    ctx.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "workflows.panel",
+          title: "Workflows: toggle the live progress tree",
+          group: "Workflows",
+          bind: "<leader>o",
+          palette: true,
+          slash: { name: "wf" },
+          run: () => openPanel(),
+        },
+        {
+          id: "workflows.message",
+          title: "Workflows: agents (steer, stop, open)",
+          group: "Workflows",
+          bind: "<leader>j",
+          palette: true,
+          run: () => void agentDialog(),
+        },
+      ],
+    }))
+
     // ---- surfaces -----------------------------------------------------------------------------
 
     const muted = () => ctx.theme?.text?.muted
@@ -272,7 +311,7 @@ const plugin = {
     cleanups.push(
       ctx.ui.slot({
         append: "session.panel",
-        render: (input: any) => (
+        render: (input) => (
           <Show when={input.name === PANEL}>
             <Panel
               ctx={ctx}
@@ -302,36 +341,6 @@ const plugin = {
         ),
       }),
     )
-    cleanups.push(
-      ctx.ui.slot({
-        append: "app",
-        render() {
-          ctx.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-              {
-                id: "workflows.panel",
-                title: "Workflows: toggle the live progress tree",
-                group: "Workflows",
-                bind: "<leader>o",
-                palette: true,
-                slash: { name: "wf" },
-                run: () => openPanel(),
-              },
-              {
-                id: "workflows.message",
-                title: "Workflows: agents (steer, stop, open)",
-                group: "Workflows",
-                bind: "<leader>j",
-                palette: true,
-                run: () => void agentDialog(),
-              },
-            ],
-          }))
-          return null
-        },
-      }),
-    )
 
     return () => {
       for (const c of cleanups.splice(0).reverse()) {
@@ -341,6 +350,6 @@ const plugin = {
       }
     }
   },
-}
+} satisfies Plugin.Definition
 
 export default plugin

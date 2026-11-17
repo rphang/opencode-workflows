@@ -115,6 +115,23 @@ describe("X25 agent dialog", () => {
   })
 })
 
+describe("X15 X25 TUI entry on opencode 2.3", () => {
+  test("X15 X25 the global commands are a setup-time keymap layer (no `app` slot render), setup is typed against the TUI plugin definition, and the target is watched reactively", () => {
+    const src = readFileSync(join(root, "src", "tui", "index.tsx"), "utf8")
+    expect(src).not.toMatch(/append: "app"/)
+    expect(src).toMatch(/import type \{ Plugin \} from "@opencode\/plugin\/tui"/)
+    expect(src).toMatch(/satisfies Plugin\.Definition/)
+    expect(src).not.toMatch(/setup\(ctx: any\)/)
+    // The keymap layer is created in setup itself, before any slot.
+    const layer = src.indexOf("ctx.keymap.layer(")
+    expect(layer).toBeGreaterThan(0)
+    expect(layer).toBeLessThan(src.indexOf("ctx.ui.slot("))
+    // The 500 ms poll of the route is gone: a Solid effect on the (reactive) router and session data.
+    expect(src).not.toMatch(/setInterval\(\(\) => sync\.checkTarget\(\), 500\)/)
+    expect(src).toMatch(/createEffect\(/)
+  })
+})
+
 describe("X26 sidebar summary", () => {
   const research = { title: "Research", model: null, agents: 8, done: 5, running: 3, tokens: 60_000, elapsedMs: 1000 }
   const judge = { title: "Judge", model: null, agents: 4, done: 0, running: 0, tokens: 0, elapsedMs: null }
