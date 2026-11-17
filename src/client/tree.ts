@@ -458,7 +458,9 @@ export function pickerOptions(s: TreeStore, f: Filter): PickerOption[] {
       out.push({
         title: `#${a.index} ${a.label}`,
         value: { runId: r.runId, index: a.index },
-        description: [a.status, a.phase, a.model].filter(Boolean).join(" · "),
+        // No model here: opencode's dialog cuts the description at a fixed width without an
+        // ellipsis, so a provider/model id came out as "open". The tree rows show the model.
+        description: [a.status, a.phase].filter(Boolean).join(" · "),
         category: r.workflowName || r.runId,
         label: a.label,
         phase: a.phase,

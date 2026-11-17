@@ -193,6 +193,15 @@ describe("X29 side panel tree", () => {
     expect(queued.detail).toBe("queued")
   })
 
+  test("X29 a declared phase that has no agents yet shows the queued glyph, not ✓", () => {
+    const base = rows.find((r) => r.kind === "phase" && r.title === "Research")
+    if (base?.kind !== "phase") throw new Error("fixture has no Research phase")
+    const pending = { ...base, title: "Report", phase: { title: "Report", model: "m/report", agents: 0, done: 0, running: 0, tokens: 0, elapsedMs: null } }
+    expect(rowText(pending, 65_000)).toMatchObject({ glyph: "◌", title: "Report", detail: "m/report · 0/0" })
+    const finished = { ...pending, phase: { ...pending.phase, agents: 2, done: 2 } }
+    expect(rowText(finished, 65_000).glyph).toBe("✓")
+  })
+
   test("X29 toasts: an action's info toast, a control answer, and one line when the plugin is unavailable", () => {
     expect(actionToast({ type: "toast", message: "run wf_ab12 is completed", variant: "info" })).toEqual({
       title: "run wf_ab12 is completed",

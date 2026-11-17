@@ -163,6 +163,72 @@ console size). Seen: the rows showed `opencode/space-bunny-free#low` and the oth
 `agents/<i>.json` recorded the same `model`, the unlabeled phase listed its agents' models, and at
 120 columns the agent models lost their provider first.
 
+### On Linux (0.3.0 screenshots)
+
+The 0.3.0 README images (`live-tree-running`, `-agent-dialog`, `-sidebar`, `-steer`, `-stop`,
+`-open-agent`) were taken on opencode 2.3.0 without a desktop:
+
+1. `npm run build`. Put the sandbox under `.sandbox/<name>/` (`XDG_*`, `OPENCODE_TEST_HOME`, a
+   `package.json` with another name at its root) with `opencode.json`
+   `{"plugins":["file:///<repo>"],"model":"opencode/deepseek-v4.1-flash-free"}`. Use a git project in
+   a short path outside the repo with the `slow_step` plugin and the five-agent script above.
+2. Start the TUI in a fixed-size tmux pane with truecolor: a tmux config with
+   `set -g default-terminal "tmux-256color"` and `set -as terminal-overrides ",*:RGB"`, then
+   `tmux -L shots -f <conf> new-session -d -s s -x 180 -y 48 "<launch.sh>"`, where the launch script
+   exports the sandbox env and `COLORTERM=truecolor` and runs `opencode2 <project>`.
+3. Drive it with `tmux -L shots send-keys -t s -l '<text>'`, `Enter`, `C-x o` (panel), `C-x j`
+   (agent dialog), `C-d` (stop), `Down`. Capture with `tmux -L shots capture-pane -p -e -t s`
+   (24-bit SGR escapes), convert the escapes to an HTML `<pre>` (JetBrains Mono, 13.5 px, background
+   `#0a0a0a`) and screenshot the `<pre>` with Playwright's Chromium at device scale factor 1.
+4. The TUI starts a background `opencode serve --service`: when done, kill the tmux server and only
+   the service whose environment points at your sandbox.
+
+Free models have a daily quota (`provider.free-limit`); one demo run used most of it, and the last
+agent failed with that error. The finished-run image therefore stays the 2.0.15 one.
+
+### Desktop app (macOS)
+
+The `desktop-*.png` README images were taken in the macOS desktop app 2.3.0, driven over the Chrome
+DevTools Protocol with `playwright-core` (`connectOverCDP`), in a profile that shares nothing with
+your own:
+
+1. `npm run build`, then copy `dist`, `workflows`, `package.json` and `node_modules` to a directory
+   outside your home (for example `/Users/Shared/<sandbox>/plugin`). The app can show a plugin's path,
+   and a path under your home shows your user name.
+2. Start the app with an empty environment: `env -i` with `HOME`, `XDG_*` and
+   `OPENCODE_TEST_HOME` under the sandbox, `OPENCODE_DESKTOP_TEST_ROOT=<sandbox>/root` (the app keeps
+   its data, config, cache, state and window state there), `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+   then `/Applications/OpenCode.app/Contents/MacOS/OpenCode --remote-debugging-port=<port>`. A
+   packaged build ignores `OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT`; the switch works and binds to
+   127.0.0.1. Put `{"plugins":["file:///<sandbox>/plugin"],"model":"opencode/deepseek-v4.1-flash-free"}`
+   in `<sandbox>/root/config/opencode/opencode.json`.
+3. The app's background service listens on a fixed port, so a second one fails with "Managed service
+   port … is already in use" while your own service runs. Set another port with the sandbox
+   environment (`opencode service set port <port>`, which writes `<sandbox>/root/config/opencode/service.json`)
+   and press Restart.
+4. First-launch onboarding creates `~/Documents/Default Project`, using the real Documents folder
+   whatever `HOME` is, and opens it. Wipe `<sandbox>/root/data` and `<sandbox>/root/desktop/drafts.sqlite*`
+   (keep `opencode.settings`, which records that onboarding is done), restart, and create the session
+   in the demo project with `opencode api POST /api/session` and `{"location":{"directory":…}}`. Run
+   every sandbox `opencode` command from the demo project: the CLI registers its working directory as
+   a project on the server it talks to.
+5. The demo project has the `slow_step` plugin (4 s per call) and a saved workflow: three quick
+   agents (one with `effort:'low'`, one on `opencode/glm-5.3-flash-free`), two agents that call
+   `slow_step` ten times, and a `Report` phase labeled and run on `opencode/mimo-v2.6-flash-free`.
+   Type the request in the composer (the `Prompt` textbox), then click the pill, its menu row, a row's
+   Message and Stop buttons, and Open session (while the run is still active, to see the pill there). Screenshots are `page.screenshot` at the window's
+   device scale factor (2).
+6. Quit only the app and the `opencode-cli serve --service` whose paths are in your sandbox.
+
+Seen on 2.3.0: the pill appeared 2 s after the launch (`wf 0/5 · 0 · $0`), its menu row opened the
+panel on the run, the rows showed each agent's model (`…#low`, the other models) and live
+`» slow_step {"n":…}` activity, a message reached `#4` (its reply ended `STEERED-OK`, the run said
+`1 steered`), the stop ended `#3` as failed, "stopped by user", and `#4`'s own tab showed the parent's
+pill (red after the stop). The finish notice was not checked.
+The first run also showed two panel faults, fixed before the final shots: a declared phase with no
+agents yet showed ✓ (`0/0`), and at the `narrow` width the agent rows cut off their model and the
+scope switch wrapped its label and description side by side.
+
 ## What is covered (live)
 
 

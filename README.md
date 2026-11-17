@@ -13,6 +13,10 @@ script runs in the background, and its result comes back to your session when it
 opencode plugin add @rphang/opencode-workflows
 ```
 
+| In the desktop app | In the terminal |
+|---|---|
+| [![A workflow running in the opencode desktop app: the session on the left, and the live tree in the side panel with the run, its phases and each agent's status, model and buttons](docs/assets/desktop-tree-panel.png)](#desktop-app-experimental) | [![A workflow running in the opencode TUI: the live progress tree next to the session, with each agent's status, tokens, model and current tool call](docs/assets/live-tree-running.png)](#live-progress-tree-tui) |
+
 ---
 
 - [What it does](#what-it-does)
@@ -173,7 +177,7 @@ testing). If it doesn't, run `opencode service restart` or restart the TUI.
 
   ```text
   ID                 VERSION  SOURCE
-  dynamic-workflows  0.3.0    @rphang/opencode-workflows
+  dynamic-workflows  0.3.1    @rphang/opencode-workflows
   ```
 
   The first `opencode` command after an install starts the background service, and `plugin list`
@@ -185,7 +189,7 @@ testing). If it doesn't, run `opencode service restart` or restart the TUI.
 
 | I want to… | Do this |
 |---|---|
-| Pin a version | `opencode plugin add @rphang/opencode-workflows@0.3.0`, or `"plugins": ["@rphang/opencode-workflows@0.3.0"]` |
+| Pin a version | `opencode plugin add @rphang/opencode-workflows@0.3.1`, or `"plugins": ["@rphang/opencode-workflows@0.3.1"]` |
 | Pass plugin options | `"plugins": [{ "package": "@rphang/opencode-workflows", "options": { "sizeGuideline": "small" } }]` (see [Configuration](#configuration)) |
 | Install for one project only | The same `plugins` entry in `<project>/opencode.json`. Worktree agents then need that config committed, so the global install is recommended. |
 | Update | Unpinned installs track `latest`. opencode checks for updates every 24 h; run `opencode plugin check`, then `opencode plugin update @rphang/opencode-workflows`. To update a pinned install, change the version in the config. |
@@ -323,9 +327,10 @@ an extension: Claude Code's workflows do not have it.
 
 Or ask the model ("tell the researchers to prefer primary sources"): it calls `workflow_control`
 with `action: "message"`. The model only does this when you ask, and only for its own session's runs.
-In the TUI, select an agent in the [live progress tree](#live-progress-tree-tui) and press `m`:
+In the TUI, select an agent in the [live progress tree](#live-progress-tree-tui) and press `m`, or
+pick it in the agent dialog (`ctrl+x j`) and press Enter:
 
-![The live tree's message dialog, sending "Also end your reply with STEERED-OK." to the running agent #4 slow listener](docs/assets/live-tree-steer.png)
+![The message dialog for the running agent #4 slow listener, with the text "Also end your reply with STEERED-OK."; the tree behind it shows both slow agents on slow_step call 6](docs/assets/live-tree-steer.png)
 
 | Target | Meaning |
 |---|---|
@@ -360,7 +365,7 @@ How it behaves:
 In the terminal UI, the plugin adds a live, interactive view of your workflow runs. This is an
 extension beyond Claude Code's workflow tool.
 
-![The live progress tree next to a session: the Scan phase lists the models its agents use, the Report phase shows its meta model label, and each agent row shows the model it runs on (one with the #low effort variant, one on another model) while two agents run slow_step tool calls](docs/assets/live-tree-running.png)
+![The live progress tree next to a session on opencode 2.3.0: the Scan phase lists the models its agents use, the Report phase shows its meta model label, and each agent row shows the model it runs on (one with the #low effort variant, one on opencode/glm-5.3-flash-free) while two agents run slow_step tool calls](docs/assets/live-tree-running.png)
 
 - **Footer.** While a run of the current session is active, the prompt footer shows
   `wf <name> <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). The home screen
@@ -376,7 +381,7 @@ extension beyond Claude Code's workflow tool.
   and elapsed time always stay. The footer likewise shortens only the workflow name.
   ![The tree in a 120-column terminal: the run id is gone; on the rows that don't fit, the agent model loses its provider and is shortened along with the activity, while status, tokens and time stay; #3 was stopped](docs/assets/live-tree-narrow.png)
 - **Models.** Each agent row shows the model the agent runs on, as `provider/model#variant`:
-  `opencode/space-bunny-free#low` is the parent's model with `effort: 'low'`, and an agent with its
+  `opencode/deepseek-v4.1-flash-free#low` is the parent's model with `effort: 'low'`, and an agent with its
   own `model` shows that model. It is the model opencode reports for the agent's session, so if
   opencode falls back to another model, the row shows it (and the agent gets a warning). A phase
   shows its `meta.phases[].model` label when the script declares one, and otherwise the models its
@@ -411,21 +416,27 @@ or run id. Then:
 | `ctrl+d` | stop the agent, after a confirmation |
 | `ctrl+o` | open the agent's session (in a tab when tabs are on) |
 
+![The agent dialog over a running workflow: a search line, the two running agents #3 slow stepper and #4 slow listener with their status and phase, and the actions urgent steer ctrl+u, stop ctrl+d, open ctrl+o](docs/assets/live-tree-agent-dialog.png)
+
 **Sidebar.** When the session has runs, the session sidebar gets a **Workflows** section under
 opencode's own: up to three runs (running ones first) with a colored status dot, `done/total`, and a
 line with the current phase, running agents, tokens and cost. Click a run to open the panel on it.
 With more than two runs, click the header to fold the section (it stays folded across restarts and
 then shows `(1 running · $0.42)`).
 
+![The session sidebar under Context: a Workflows section with live-tree-demo at 3/5 and the line "Scan · 2 running · 28.5k · $0", while the prompt footer shows the same run](docs/assets/live-tree-sidebar.png)
+
 Right after opencode starts, the plugins may still be loading: the panel says `loading…` and the tree
 retries for a few seconds before it reports that the workflows RPC is unavailable.
 
-| Opening an agent (Enter) | Stopping it (`x`, then confirm) | Finished, with the notification |
+| Opening an agent (Enter) | Stopping it (`x`, or `ctrl+d` in the agent dialog, then confirm) | Finished, with the notification |
 |---|---|---|
-| ![The steered agent's child session: the workflow message arrives between two slow_step calls and its reply ends with STEERED-OK; the tree still tracks the parent run](docs/assets/live-tree-open-agent.png) | ![The stop confirmation for #3 slow stepper](docs/assets/live-tree-stop.png) | ![The parent session answers the task notification; the tree shows the finished run with one stopped and one steered agent](docs/assets/live-tree-done.png) |
+| ![The steered agent's child session: the workflow message arrives between its slow_step calls and its reply ends with STEERED-OK; the sidebar's Workflows section still shows the parent's run](docs/assets/live-tree-open-agent.png) | ![The stop confirmation for #3 slow stepper, opened from the agent dialog](docs/assets/live-tree-stop.png) | ![The parent session answers the task notification; the tree shows the finished run with one stopped and one steered agent](docs/assets/live-tree-done.png) |
 
-The TUI screenshots come from opencode 2.0.15 in Windows conhost, with free `opencode/*` models
-(the parent on `opencode/space-bunny-free`) and a demo tool, `slow_step`, that takes 4 s per call.
+The TUI screenshots come from opencode 2.3.0 in a Linux terminal (tmux, 180×48), with free
+`opencode/*` models (the parent on `opencode/deepseek-v4.1-flash-free`) and a demo tool,
+`slow_step`, that takes 4 s per call. The narrow-panel and finished-run images are from the same
+demo on opencode 2.0.15 in Windows conhost.
 
 **Notifications.** When a run finishes while the terminal is not focused, the TUI sends a desktop
 notification if you enabled opencode's attention notifications in `cli.json` (next to your
@@ -452,7 +463,8 @@ curl -u opencode:$OPENCODE_PASSWORD -H "content-type: application/json" \
 
 opencode's desktop app (2.3) can load a plugin's GUI part, and this plugin ships one
 (`dist/gui-experimental.cjs`, the `./gui-experimental` export). opencode marks this plugin API as
-experimental, and this part has not been checked in a real desktop app yet.
+experimental. The pill (also in a workflow agent's own tab), the tree panel, steering and stop were
+checked live in the macOS desktop app 2.3.0 (the screenshots below); the finish notice was not.
 
 - **Composer pill.** While a run of the session is active, a pill above the composer shows
   `wf <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). It turns orange when a
@@ -468,6 +480,18 @@ experimental, and this part has not been checked in a real desktop app yet.
   notification under your Agent (or, for a failed run, Errors) notification settings. Clicking it
   opens the session. If none was shown (for example because the app has focus), you get a toast.
 - From a workflow agent's own tab, the pill and the tree show the parent's run.
+
+![The desktop app's composer pill "wf 3/5 · 54.6k · $0" above the composer, with its menu open: a heading "Workflow api-review" and one row, api-review 3/5 · 54.6k · $0](docs/assets/desktop-pill.png)
+
+![The tree in the desktop app's side panel next to the session: the api-review run, its Scan phase with three completed agents on their models and two running slow agents with stop, message and urgent-message buttons, and the Report phase, not started yet (◌ 0/0), with its model label](docs/assets/desktop-tree-panel.png)
+
+| Steer an agent | Stop an agent | Finished run |
+|---|---|---|
+| ![The message dialog for #4 slow listener, with the text "Also end your reply with STEERED-OK." and the note that the agent reads it at its next step boundary](docs/assets/desktop-steer.png) | ![The Stop agent confirmation for #3 slow stepper, with the toast that confirms the message sent to #4](docs/assets/desktop-stop.png) | ![The parent session's report after the task notification; the tree shows the completed run (6/6, 1 steered), #3 stopped by user and the Report phase's agent](docs/assets/desktop-done.png) |
+
+The desktop screenshots come from opencode desktop 2.3.0 on macOS, in a sandboxed profile with a demo
+project, the same `slow_step` demo tool and free `opencode/*` models (the parent on
+`opencode/deepseek-v4.1-flash-free`).
 
 The app loads the GUI part for the plugins of its own server: list the plugin in `plugins` in
 `opencode.json(c)` and install it from npm or a built directory (see

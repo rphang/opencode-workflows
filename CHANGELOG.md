@@ -8,6 +8,30 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-18
+
+### Fixed
+
+- Desktop app tree panel: a declared phase whose agents have not started (`0/0`) showed ✓; it now
+  shows the queued glyph ◌. Seen live in the macOS desktop app 2.3.0.
+- Desktop app tree panel: it opens 420 px wide instead of the narrowest side width, where agent rows
+  cut off their model, and the scope switch sits at the end of its own row instead of wrapping its
+  label and description side by side.
+- TUI agent dialog (`ctrl+x j`): each row's description is now `status · phase`. With the model
+  appended, opencode's dialog cut the line without an ellipsis and the model showed as `open` (seen
+  live on opencode 2.3.0). The tree rows still show each agent's model.
+
+### Docs
+
+- README screenshots retaken on opencode 2.3.0 (running tree, steering, stop, steered agent session)
+  plus two new ones: the agent dialog and the sidebar section. `docs/E2E.md` describes the Linux
+  (tmux) capture recipe.
+- README: five desktop app screenshots (composer pill and its menu, the tree panel, steering, stop,
+  a finished run), taken in the macOS desktop app 2.3.0. The pill and the tree panel are now
+  live-verified there (PARITY X28, X29); the finish notice (X30) is not. `docs/E2E.md` describes the
+  desktop capture recipe.
+- README: the desktop tree panel and the TUI tree side by side right under the install command.
+
 ## [0.3.0] - 2026-11-17
 
 ### Added
@@ -269,7 +293,8 @@ Compared with Claude Code (details and status per item in `docs/PARITY.md`):
   `opencode serve`. After a hard crash, suspended child sessions and `wf-<runId>-<i>` worktrees are
   not cleaned up automatically.
 
-[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rphang/opencode-workflows/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/rphang/opencode-workflows/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rphang/opencode-workflows/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rphang/opencode-workflows/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rphang/opencode-workflows/releases/tag/v0.1.0

@@ -11,6 +11,14 @@ changed in **2.3.0** (the current pin).
 Read from the `v2.0.15..v2.3.0` tags of `anomalyco/opencode`; the unit and parity suites pass against
 the 2.3.0 packages and `tsc` is clean against their types.
 
+Seen live on 2.3.0 (TUI in tmux on Linux, free `opencode/*` models, the 0.3.0 plugin from a
+directory install): the plugin loaded with its TUI part, a run's agents ran on their per-agent models
+(one `#low` variant), a steering message sent from the agent dialog was read at the agent's next step
+boundary (its reply ended with the requested marker), the sidebar `sidebar.content` slot rendered
+for the session and for a workflow agent's session, the task notification reached the parent, and an
+agent that hit `provider.free-limit` reported that error text (the failed-turn `error`, not the old
+generic message). The idle hook, freeform input and background-subagent waits were not exercised.
+
 - **Every `ctx.*` call the plugin makes keeps its 2.0.15 shape** (session, tool, permission, agent,
   model, worktree, storage, rpc, event, command). Type-only changes: `session.wait` moved to
   `ExperimentalSessionApi` (still on `ctx.session`; the client marks the old path "removed in the

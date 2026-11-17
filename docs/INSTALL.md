@@ -67,10 +67,10 @@ If you prefer a project-only install, put the same `plugins` entry in `<project>
 ### Pinning a version
 
 ```sh
-opencode plugin add @rphang/opencode-workflows@0.3.0
+opencode plugin add @rphang/opencode-workflows@0.3.1
 ```
 
-or `"plugins": ["@rphang/opencode-workflows@0.3.0"]`. A pinned spec is never flagged as outdated. To
+or `"plugins": ["@rphang/opencode-workflows@0.3.1"]`. A pinned spec is never flagged as outdated. To
 upgrade, change the version.
 
 ### Plugin options
@@ -125,7 +125,7 @@ in `.opencode/workflows/` and `~/.config/opencode/workflows/`.
 - `opencode plugin list` should list `@rphang/opencode-workflows` (plugin id `dynamic-workflows`) as
   active.
 - With `opencode serve`, `GET /api/plugin` shows
-  `{"id":"dynamic-workflows","source":{"type":"package","target":"@rphang/opencode-workflows","version":"0.3.0"},"state":{"status":"active"}}`,
+  `{"id":"dynamic-workflows","source":{"type":"package","target":"@rphang/opencode-workflows","version":"0.3.1"},"state":{"status":"active"}}`,
   and `GET /api/command` lists `workflows`, `workflow-authoring` and `deep-research`.
 
 ## From source
@@ -209,8 +209,8 @@ and loads it for every plugin listed in `plugins`. opencode marks this plugin AP
 
 | Install | GUI entry | Pill, tree panel, finish notice |
 |---|---|---|
-| npm package (`plugins` entry or `opencode plugin add`) | `exports["./gui-experimental"]` → `dist/gui-experimental.cjs`, one CommonJS file | yes (not live-verified) |
-| Directory entry (`file:///…/opencode-workflows`) | the same export (build first) | yes (not live-verified) |
+| npm package (`plugins` entry or `opencode plugin add`) | `exports["./gui-experimental"]` → `dist/gui-experimental.cjs`, one CommonJS file | yes (the same bundle as the directory entry) |
+| Directory entry (`file:///…/opencode-workflows`) | the same export (build first) | yes (pill and tree live-verified on desktop 2.3.0) |
 | Loader file (`plugins/workflows.js`) | none | no |
 
 `dist/gui-experimental.cjs` is built with opencode's Vite preset (`@opencode/plugin/gui/vite`) and
