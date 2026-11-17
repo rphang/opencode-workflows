@@ -325,12 +325,13 @@ export async function createHarness(): Promise<Harness> {
       opts.ctx?.(p.ctx)
       const runner = opts.runner ?? new FakeRunner()
       const createRunner: PluginDeps["createRunner"] = opts.real
-        ? ({ ctx, parentSessionID, parentAgent, runId, registry }) =>
+        ? ({ ctx, parentSessionID, parentAgent, runId, registry, live }) =>
             createOpencodeRunner(ctx as any, {
               parentSessionID,
               parentAgent,
               runId,
               registry,
+              live,
               deniedTools: ["workflow", "workflow_control"],
               git: p.fake.git,
             })

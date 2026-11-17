@@ -79,6 +79,7 @@ describe("runner steer window", () => {
   test("X03 a message sent after the last step: the runner itself starts the successor turn (interrupt resume:true) and reads that reply", async () => {
     const mb = new AgentMailbox()
     const { fake, runner } = setup({
+      idleHookFires: false, // 2.0.15, or a message after the idle check: the fallback path
       successorDelayMs: 20,
       respond: ({ successor }) =>
         successor
@@ -104,6 +105,7 @@ describe("runner steer window", () => {
   test("X03 a message that never reaches the agent is reported undelivered, with a warning; the result stays the turn's reply", async () => {
     const mb = new AgentMailbox()
     const { runner } = setup({
+      idleHookFires: false,
       noSuccessor: true,
       respond: () => ({ steps: 1, afterSteps: () => void mb.post(msg("lost")), text: "first answer" }),
     })
@@ -119,6 +121,7 @@ describe("runner steer window", () => {
     const { fake, runner } = setup({
       // opencode would start a resume:true item's successor turn on its own; here it would come after
       // the ~2 s verify window, when nobody reads the session any more.
+      idleHookFires: false,
       successorDelayMs: 2_600,
       ignoreWake: true,
       respond: ({ successor }) =>

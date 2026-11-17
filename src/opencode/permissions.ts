@@ -8,6 +8,7 @@
 // cannot ask (fail closed), except where noted by the caller.
 
 import type { Plugin } from "@opencode/plugin"
+import { createWorkflowChildLookup } from "./children.ts"
 
 export interface PermissionRule {
   action: string
@@ -107,28 +108,10 @@ export interface PermissionEvaluationEvent {
  * (including the one loaded in a worktree) guards its own children.
  */
 export function createChildAskGuard(ctx: Pick<Plugin.Context, "session">, cacheLimit = 4096) {
-  const known = new Map<string, Promise<boolean>>()
-  const isWorkflowChild = (sessionID: string): Promise<boolean> => {
-    let p = known.get(sessionID)
-    if (!p) {
-      p = (async () => {
-        try {
-          // Deferred so a synchronous throw also lands after the cache entry is set (and is removed).
-          const info = (await Promise.resolve().then(() => ctx.session.get({ sessionID } as any))) as any
-          return typeof info?.metadata?.workflowRunId === "string"
-        } catch {
-          known.delete(sessionID) // unknown / transient failure: not cached
-          return false
-        }
-      })()
-      if (known.size >= cacheLimit) known.clear()
-      known.set(sessionID, p)
-    }
-    return p
-  }
+  const workflowRunOf = createWorkflowChildLookup(ctx, cacheLimit)
   return async (event: PermissionEvaluationEvent): Promise<void> => {
     if (event.effect !== "ask" || !event.sessionID) return
-    if (!(await isWorkflowChild(event.sessionID))) return
+    if ((await workflowRunOf(event.sessionID)) === undefined) return
     event.effect = "deny"
     event.message = CHILD_ASK_DENIED_MESSAGE
   }

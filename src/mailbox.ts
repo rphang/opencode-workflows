@@ -13,6 +13,8 @@
 // change cannot interleave): pending → held; between → sent at open(); open → sent now; finishing →
 // refused `finishing`; closed → refused `finished`. close() awaits every send that started while the
 // window was open, so a message accepted just before the turn ended is always verified by the runner.
+// quiesce() (the opencode 2.3+ idle hook, X22) moves open → finishing ahead of close() and awaits the
+// sends in flight; the hook reopens the window when the execution goes on (open()).
 
 export const MAX_MESSAGE_CHARS = 4000
 export const MAX_MESSAGES_PER_AGENT = 20
@@ -172,6 +174,18 @@ export class AgentMailbox {
     const sent = this.windowSent
     this.windowSent = []
     return sent
+  }
+
+  /**
+   * Idle-hook side (X22): the agent's execution is about to end. An open window moves to `finishing`
+   * (new messages are refused until the next open()), and every send in flight is awaited. Unlike
+   * close(), the window's sent list is kept, so close() still returns it for verification. Resolves
+   * with the messages sent in this window so far.
+   */
+  async quiesce(): Promise<SentMessage[]> {
+    if (this._state === "open") this._state = "finishing"
+    while (this.inflight.size) await Promise.all([...this.inflight])
+    return this.windowSent.map((s) => ({ ...s }))
   }
 
   /** Runner side: confirms (or not) that a held or sent message reached the agent. */

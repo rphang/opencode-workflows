@@ -15,6 +15,9 @@
 // One that missed the turn is parked (resume:false wakes nothing), so the runner wakes the session
 // with interrupt({resume:true}) and waits for that successor turn before it reads the result. A
 // message it gives up on stays parked and never starts a turn nobody reads.
+// opencode 2.3+ (X22, X23): the instance's `experimental.idle` hook (src/opencode/idle.ts) reads the
+// child's entry in `options.live` to flush late messages and nudge a schema agent within the same
+// execution. The runner never depends on it: the paths above stay as the fallback.
 // Live-verified shapes: docs/OPENCODE-API-NOTES.md.
 
 import { execFile } from "node:child_process"
@@ -37,6 +40,7 @@ import {
   type AgentInfo,
   type PermissionRule,
 } from "./permissions.ts"
+import type { ChildLiveEntry, ChildLiveRegistry } from "./idle.ts"
 import { formatOrchestratorMessage, STEERING_PREAMBLE_LINE } from "./steer.ts"
 import { attemptsUsed, createSubmitRegistry, retryPrompt, type SubmitRegistry, type SubmitState } from "./submit.ts"
 
@@ -115,6 +119,11 @@ export interface OpencodeRunnerOptions {
   git?: GitExec
   /** Per-agent timeout; default env OPENCODE_WORKFLOW_AGENT_TIMEOUT_MS (unset/0 = none). */
   timeoutMs?: number
+  /**
+   * This plugin instance's live children, read by its `experimental.idle` hook (X22, X23). Optional:
+   * without it (or when the hook never runs) the runner's own wake and re-prompt paths do the work.
+   */
+  live?: ChildLiveRegistry
 }
 
 const defaultGit: GitExec = (args, cwd) =>
@@ -279,11 +288,13 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
       // Stop signal: abort or per-agent timeout, whichever first.
       const timeoutMs = options.timeoutMs ?? envTimeout()
       let stopReason: StopReason | undefined
+      let liveEntry: ChildLiveEntry | undefined
       let onStop!: (r: StopReason) => void
       const stopped = new Promise<StopReason>((resolve) => {
         onStop = (r) => {
           if (!stopReason) {
             stopReason = r
+            if (liveEntry) liveEntry.stopping = true
             resolve(r)
           }
         }
@@ -554,6 +565,14 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
 
         // Messages sent while the agent was queued go into its first prompt (X04).
         const held = mailbox?.attach(sendSteer, schema ? submittedGuard : undefined) ?? []
+        // X22/X23: the idle hook of this instance finds the child's mailbox and schema here.
+        liveEntry = options.live?.register(sessionID, {
+          runId: request.runId,
+          index: request.index,
+          mailbox,
+          schema: !!schema,
+          stopping: !!stopReason,
+        })
         const withHeld = (text: string) => (held.length ? `${text}\n\n${held.map(formatOrchestratorMessage).join("\n\n")}` : text)
         const reportHeld = () => {
           for (const m of held) mailbox?.report(m.id, "delivered")
@@ -616,6 +635,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         await refreshUsage()
         return { status: "failed", error: errMsg(e), usage, sessionID }
       } finally {
+        if (sessionID && liveEntry) options.live?.unregister(sessionID, liveEntry)
         mailbox?.seal()
         signal.removeEventListener("abort", onAbort)
         if (timer) clearTimeout(timer)

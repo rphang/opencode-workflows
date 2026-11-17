@@ -241,6 +241,18 @@ const turn = async (text) => {
 `AgentRecord.messages` tracks each message's status: `held`, then `sent`, then `delivered`
 (when the id shows up in `context()` at `close()`), or `undelivered` (warning).
 
+**opencode 2.3+ (X22, X23).** The `experimental.idle` session hook runs right before a child's
+execution ends, and input admitted by then continues that execution. The hook (`src/opencode/idle.ts`)
+finds the child in its instance's live map and calls `mailbox.quiesce()`: `open` → `finishing` and
+in-flight sends awaited, without consuming the window's sent list (so `close()` still verifies).
+If a sent message is not in `context()` yet, it is in the inbox and the execution continues with
+it: the window reopens. Otherwise later messages are refused `finishing`. For a schema agent with
+no accepted submission the hook then nudges it in the same execution (the re-prompt text as a
+`resume:false` steer, counted in the P21 budget) and reopens the window. The protocol above stays
+unchanged as the fallback: the hook never fires on 2.0.15, a worktree child's hook runs in another
+instance without the mailbox, and a hook that exceeds its 3 s cap or a turn that was interrupted
+does nothing.
+
 ## A.5 Engine and host changes
 
 - `LiveAgent` gets `mailbox: AgentMailbox`, created at `callAgent` time in state `pending`, and it

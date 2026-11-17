@@ -75,8 +75,12 @@ export interface StorageLike {
 export interface SubmitRegistry {
   register(sessionID: string, schema: Schema): Promise<void>
   unregister(sessionID: string): Promise<void>
-  /** Current state (memory, refreshed from storage). undefined when not registered. */
-  read(sessionID: string): Promise<SubmitState | undefined>
+  /**
+   * Current state (memory, refreshed from storage). undefined when not registered. With `stored`,
+   * only a state present in storage counts: another instance (the runner's) may have unregistered
+   * the session, which this instance's memory copy does not know.
+   */
+  read(sessionID: string, opts?: { stored?: boolean }): Promise<SubmitState | undefined>
   submit(sessionID: string, output: unknown): Promise<SubmitResult>
   /**
    * A new prompt or nudge asks for the submission again: the attempt that just ended counts as
@@ -104,7 +108,7 @@ export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
   const mem = new Map<string, SubmitState>()
   const key = (id: string) => SUBMIT_STORAGE_PREFIX + id
 
-  async function load(sessionID: string): Promise<SubmitState | undefined> {
+  async function load(sessionID: string, storedOnly = false): Promise<SubmitState | undefined> {
     const local = mem.get(sessionID)
     let stored: SubmitState | undefined
     if (storage) {
@@ -114,6 +118,10 @@ export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
       } catch {
         // storage unavailable: memory only
       }
+    }
+    if (storedOnly && !stored) {
+      mem.delete(sessionID)
+      return undefined
     }
     const best = newer(local, stored)
     if (best) mem.set(sessionID, best)
@@ -146,8 +154,8 @@ export function createSubmitRegistry(storage?: StorageLike): SubmitRegistry {
         }
       }
     },
-    async read(sessionID) {
-      const s = await load(sessionID)
+    async read(sessionID, opts) {
+      const s = await load(sessionID, !!opts?.stored)
       return s ? structuredClone(s) : undefined
     },
     async submit(sessionID, output) {

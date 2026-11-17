@@ -1,5 +1,5 @@
 // Fake opencode v2 plugin Context for runner unit tests. Shapes mirror what opencode 2.0.15
-// returned live (see docs/OPENCODE-API-NOTES.md):
+// returned live, plus the 2.3.0 changes listed below (see docs/OPENCODE-API-NOTES.md):
 //
 //   session.create -> Session.Info {id, projectID, model?, cost, tokens:{input,output,reasoning,
 //                     cache:{read,write}}, time, title, metadata, permissions, location}
@@ -23,6 +23,18 @@
 //                     re-checks); an item admitted after wait() resolved needs another wait().
 //   worktree.create -> {directory}; worktree.remove -> undefined
 //   model.list -> {location, data: ModelInfo[] (variants: [{id}])}
+//
+// opencode 2.3.0 additions (source-read, docs/OPENCODE-API-NOTES.md first section):
+//   - a failed turn's idle marker carries `error` (FakeTurn.idleError, else .error); an interrupted
+//     step keeps its text and its assistant message gets `error: {type:"aborted", message:"Step interrupted"}`.
+//   - session.hook(name, cb) -> {dispose}; one hook registry per plugin instance, i.e. per Location
+//     (`fake.instance(directory)` shares sessions, storage and calls). With `idleHookFires` (default
+//     true; false = 2.0.15, where the name registers and never fires) a succeeded turn runs the
+//     `experimental.idle` hooks of the session's Location ({sessionID, background}); input in the
+//     inbox after them continues the SAME execution as another respond() call (`continuation`),
+//     with one idle marker and one wait(). A rejected hook fails the execution (`hookRejectFails`).
+//     Seams: FakeTurn.beforeIdleHook (input in flight as the hook starts) and .afterIdleCheck (input
+//     that arrives after the post-hook inbox check: it waits for the next wake).
 //
 // Usage:
 //   const fake = createFakeCtx({ respond: ({ text, turn }) => ({ text: "hello" }) })
@@ -67,6 +79,19 @@ export interface FakeTurn {
   textFn?: (session: FakeSession) => string
   /** Called after this turn's `submit` values went through workflow_submit, before the turn ends. */
   afterSubmit?: () => void | Promise<void>
+  /** 2.3.0 seam: called after the turn, right before the `experimental.idle` hooks run. */
+  beforeIdleHook?: () => void | Promise<void>
+  /** 2.3.0 seam: called after the post-hook inbox check: input admitted here waits for the next wake. */
+  afterIdleCheck?: () => void | Promise<void>
+}
+
+export type Outcome = "succeeded" | "failed" | "interrupted"
+
+/** opencode 2.3.0 SessionIdleBackground (the subset the plugin reads). */
+export interface FakeBackground {
+  kind: "shell" | "subagent" | "image"
+  sessionID: string
+  [k: string]: unknown
 }
 
 export interface TurnInput {
@@ -77,6 +102,10 @@ export interface TurnInput {
   session: FakeSession
   /** A turn opencode started by itself to read inbox items (resume:true), not a prompt. */
   successor?: boolean
+  /** 2.3.0: input admitted at the idle boundary (e.g. by an `experimental.idle` hook) continues the same execution. */
+  continuation?: boolean
+  /** The inbox items this successor or continuation turn starts with. */
+  items?: InboxItem[]
 }
 
 export type Responder = (input: TurnInput) => FakeTurn | Promise<FakeTurn>
@@ -98,6 +127,8 @@ export interface FakeSession {
   /** The last turn was interrupted with resume:true: a successor turn follows. */
   resumeAfterInterrupt?: boolean
   successorScheduled?: boolean
+  /** Background work reported to `experimental.idle` hooks (event.background). */
+  background?: FakeBackground[]
 }
 
 export interface InboxItem {
@@ -144,6 +175,23 @@ export interface FakeCtxOptions {
    * variant "default"); undefined = no model (get() shows none, like opencode's default model).
    */
   childModel?: (requested: any) => { providerID: string; id: string; variant?: string } | undefined
+  /**
+   * 2.3.0 (default true): after a succeeded turn the `experimental.idle` hooks of the session's
+   * Location run, and input in the inbox after them continues the same execution. false = 2.0.15:
+   * the hook registers but never fires and nothing continues.
+   */
+  idleHookFires?: boolean
+  /** ctx.session.hook is missing (an opencode without session hooks). */
+  noSessionHook?: boolean
+  /** A rejected hook fails the execution, as opencode's Effect.promise does (default true). */
+  hookRejectFails?: boolean
+}
+
+export interface FakeInstance {
+  directory: string
+  /** session.hook(name, cb) registrations of this instance. */
+  sessionHooks: { name: string; cb: (event: any) => unknown }[]
+  ctx: any
 }
 
 export interface FakeAgent {
@@ -219,6 +267,8 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     submitResults: [] as { sessionID: string; result: Tool.Result }[],
     update: [] as any[],
     synthetic: [] as any[],
+    /** experimental.idle hook invocations (one per registered hook). */
+    idleHook: [] as { sessionID: string; directory: string }[],
   }
   /** permission.hook("evaluate", cb) registrations (opencode runs them on every rule evaluation). */
   const permissionHooks: { name: string; cb: (event: any) => unknown }[] = []
@@ -267,14 +317,73 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     }, opts.successorDelayMs ?? 5)
   }
 
+  /**
+   * One execution: a turn (prompt or successor), then, on 2.3.0 (`idleHookFires`), the
+   * `experimental.idle` hooks of the session's Location and the inbox check after them. Input the
+   * hooks (or anyone) admitted by then continues the SAME execution as another assistant message
+   * (a `continuation` respond call): one idle marker, one wait().
+   */
   async function runTurn(s: FakeSession, text: string | null, turn: number) {
     s.running = true
-    const successor = text === null
     s.resumeAfterInterrupt = false
+    let input: { text: string | null; turn: number; continuation: boolean } = { text, turn, continuation: false }
+    let end: { outcome: Outcome; spec: FakeTurn; hookError?: { type: string; message: string } }
+    for (;;) {
+      end = await segment(s, input.text, input.turn, input.continuation)
+      if (end.outcome !== "succeeded" || opts.idleHookFires === false || end.spec.noAssistant) break
+      // A steer already waiting takes another step before any hook runs.
+      if (s.inbox.length) {
+        input = { text: null, turn: s.turns++, continuation: true }
+        continue
+      }
+      await end.spec.beforeIdleHook?.()
+      try {
+        await fireIdle(s)
+      } catch (e) {
+        if (opts.hookRejectFails !== false) {
+          end = { ...end, outcome: "failed", hookError: { type: "unknown", message: e instanceof Error ? e.message : String(e) } }
+          break
+        }
+      }
+      // opencode: `if (!(yield* SessionInbox.has(db, sessionID, "input"))) return DrainResult.Complete()`
+      const pending = s.inbox.length > 0
+      await end.spec.afterIdleCheck?.()
+      if (!pending) break
+      input = { text: null, turn: s.turns++, continuation: true }
+    }
+    const { outcome, spec } = end
+    const idleError = outcome === "failed" ? (end.hookError ?? spec.idleError ?? spec.error) : undefined
+    s.messages.push({ id: `msg_i${++seq}`, time: { created: 3 }, type: "idle", outcome, ...(idleError ? { error: { ...idleError } } : {}) })
+    s.info.outcome = outcome
+    s.info.time.idle = 3
+    s.running = false
+    if (s.inbox.some((i) => i.resume) || s.resumeAfterInterrupt) scheduleSuccessor(s)
+  }
+
+  /** Runs the `experimental.idle` hooks registered by the instance serving the session's Location. */
+  async function fireIdle(s: FakeSession) {
+    const inst = instances.get(String(s.info.location?.directory))
+    for (const h of [...(inst?.sessionHooks ?? [])]) {
+      if (h.name !== "experimental.idle") continue
+      calls.idleHook.push({ sessionID: s.info.id, directory: inst!.directory })
+      await h.cb({ sessionID: s.info.id, background: structuredClone(s.background ?? []) })
+    }
+  }
+
+  /** One model turn: respond() once, its steps, one assistant message. No idle marker. */
+  async function segment(s: FakeSession, text: string | null, turn: number, continuation: boolean): Promise<{ outcome: Outcome; spec: FakeTurn }> {
+    const successor = text === null && !continuation
     const first = drain(s)
-    const spec = await respond({ sessionID: s.info.id, text: successor ? first.map((i) => i.text).join("\n\n") : text, turn, session: s, successor })
+    const spec = await respond({
+      sessionID: s.info.id,
+      text: text === null ? first.map((i) => i.text).join("\n\n") : text,
+      turn,
+      session: s,
+      successor,
+      ...(continuation ? { continuation, items: first } : successor ? { items: first } : {}),
+    })
     if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs))
-    let outcome: "succeeded" | "failed" | "interrupted" = spec.outcome ?? "succeeded"
+    let outcome: Outcome = spec.outcome ?? "succeeded"
     for (let i = 0; i < (spec.steps ?? 1); i++) {
       if (i > 0) drain(s)
       await spec.onStep?.(i)
@@ -287,7 +396,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
       s.interruptFlag = undefined
     }
     if (spec.hang && outcome !== "interrupted") {
-      outcome = await new Promise<"succeeded" | "failed" | "interrupted">((resolve) => {
+      outcome = await new Promise<Outcome>((resolve) => {
         s.finishTurn = resolve
       })
       s.finishTurn = undefined
@@ -359,15 +468,10 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         s.info.cost += cost
       }
     }
-    const idleError = outcome === "failed" ? (spec.idleError ?? spec.error) : undefined
-    s.messages.push({ id: `msg_i${++seq}`, time: { created: 3 }, type: "idle", outcome, ...(idleError ? { error: { ...idleError } } : {}) })
-    s.info.outcome = outcome
-    s.info.time.idle = 3
-    s.running = false
-    if (s.inbox.some((i) => i.resume) || s.resumeAfterInterrupt) scheduleSuccessor(s)
+    return { outcome, spec }
   }
 
-  const ctx = {
+  const baseCtx = {
     location: { directory, project: { id: projectID, directory, canonical: directory } },
     session: {
       async create(input: any = {}) {
@@ -536,6 +640,36 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     },
   }
 
+  /**
+   * One plugin instance per Location (opencode loads the plugin once per directory): its own
+   * `session.hook` registry, sharing sessions, storage and calls. opencode runs a session's hooks in
+   * the instance of the session's Location, so a worktree child's hooks are the worktree instance's.
+   */
+  function makeInstance(dir: string): FakeInstance {
+    const existing = instances.get(dir)
+    if (existing) return existing
+    const sessionHooks: FakeInstance["sessionHooks"] = []
+    const session: Record<string, unknown> = { ...baseCtx.session }
+    if (!opts.noSessionHook) {
+      session.hook = async (name: string, cb: (event: any) => unknown) => {
+        const entry = { name, cb }
+        sessionHooks.push(entry)
+        return {
+          dispose: async () => {
+            const i = sessionHooks.indexOf(entry)
+            if (i >= 0) sessionHooks.splice(i, 1)
+          },
+        }
+      }
+    }
+    const location = dir === directory ? baseCtx.location : { directory: dir, project: { id: projectID, directory, canonical: directory } }
+    const inst: FakeInstance = { directory: dir, sessionHooks, ctx: { ...baseCtx, location, session } as typeof baseCtx }
+    instances.set(dir, inst)
+    return inst
+  }
+  const instances = new Map<string, FakeInstance>()
+  const ctx = makeInstance(directory).ctx as typeof baseCtx
+
   /** Fake `git` for worktree change detection: HEAD is constant; status is dirty per `writeFile`. */
   async function git(args: string[], cwd: string): Promise<string> {
     if (args[0] === "rev-parse") return "0123456789abcdef\n"
@@ -568,6 +702,16 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     /** Child sessions created so far (excludes the parent). */
     children() {
       return [...sessions.values()].filter((s) => s.info.id !== PARENT_ID)
+    },
+    /** The plugin instance of another Location (e.g. a worktree), sharing sessions and storage. */
+    instance(dir: string): FakeInstance {
+      return makeInstance(dir)
+    },
+    /** The main instance's session.hook registrations. */
+    sessionHooks: makeInstance(directory).sessionHooks,
+    /** The directory a worktree created by the runner gets (`wf-<runId>-<index>`). */
+    worktreeDir(name: string): string {
+      return `C:\\data\\opencode\\worktree\\${projectID.slice(0, 6)}\\${name}`
     },
   }
 }

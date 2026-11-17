@@ -6,6 +6,7 @@ import { join } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { listWorkflows, personalWorkflowsDir, projectWorkflowDirs, type RegistryOptions } from "../registry.ts"
 import { createOpencodeRunner } from "../opencode/runner.ts"
+import { ChildLiveRegistry, idleHookEnabled, registerIdleHook } from "../opencode/idle.ts"
 import { createChildAskGuard, effectiveSessionRules } from "../opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, type SubmitRegistry } from "../opencode/submit.ts"
 import { RunStore } from "../store.ts"
@@ -21,6 +22,17 @@ export const DISABLE_ENV = "OPENCODE_DISABLE_WORKFLOWS"
 /** `0`/`false`/`no`/`off` makes the live tree's RPC read-only (X17). */
 export const RPC_CONTROL_ENV = "OPENCODE_WORKFLOW_RPC_CONTROL"
 
+/** What the plugin hands each run's runner: the submit registry and live children are per instance. */
+export interface RunnerInput {
+  ctx: Plugin.Context
+  parentSessionID: string
+  parentAgent?: string
+  runId: string
+  registry: SubmitRegistry
+  /** Read by this instance's experimental.idle hook (X22, X23). */
+  live: ChildLiveRegistry
+}
+
 /** Injection seams (tests) and host overrides. Everything is optional. */
 export interface PluginDeps {
   env?: Record<string, string | undefined>
@@ -29,7 +41,7 @@ export interface PluginDeps {
   store?: RunStore
   registryOptions?: RegistryOptions
   /** Replaces the opencode child-session runner (tests use FakeRunner). */
-  createRunner?: (input: { ctx: Plugin.Context; parentSessionID: string; parentAgent?: string; runId: string; registry: SubmitRegistry }) => AgentRunner
+  createRunner?: (input: RunnerInput) => AgentRunner
   /** Watch the saved-workflow directories and reload commands on change. Default true. */
   watch?: boolean
   now?: () => number
@@ -69,15 +81,17 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
   const dataDir = deps.dataDir ?? (typeof options.dataDir === "string" && options.dataDir ? options.dataDir : undefined)
   const store = deps.store ?? new RunStore(dataDir ? { root: dataDir } : {})
   const submitRegistry = createSubmitRegistry(ctx.storage)
+  const liveChildren = new ChildLiveRegistry()
 
   const createRunner =
     deps.createRunner ??
-    ((input: { ctx: Plugin.Context; parentSessionID: string; parentAgent?: string; runId: string; registry: SubmitRegistry }) =>
+    ((input: RunnerInput) =>
       createOpencodeRunner(input.ctx, {
         parentSessionID: input.parentSessionID,
         parentAgent: input.parentAgent,
         runId: input.runId,
         registry: input.registry,
+        live: input.live,
         // P60: workflow agents can neither launch nor manage workflows.
         deniedTools: [WORKFLOW_TOOL_NAME, CONTROL_TOOL_NAME],
       }))
@@ -106,7 +120,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     store,
     registryOptions,
     createRunner: ({ parentSessionID, parentAgent, runId }) =>
-      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry }),
+      createRunner({ ctx, parentSessionID, parentAgent, runId, registry: submitRegistry, live: liveChildren }),
     notify: (input) => ctx.session.synthetic(input as any),
     onSaved: reloadCommands,
     now: deps.now,
@@ -146,6 +160,9 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
     if (typeof permissionHook === "function") {
       registrations.push(await permissionHook("evaluate", createChildAskGuard(ctx)))
     }
+    // X22/X23: opencode 2.3+ runs `experimental.idle` before a session goes idle (2.0.15 never does).
+    const idleHook = idleHookEnabled(env) ? await registerIdleHook(ctx, { registry: submitRegistry, live: liveChildren }) : undefined
+    if (idleHook) registrations.push(idleHook)
     registrations.push(
       await ctx.tool.transform((editor) => {
         let saved: ReturnType<typeof listWorkflows> = []
