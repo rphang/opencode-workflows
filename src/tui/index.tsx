@@ -13,7 +13,6 @@
 
 import { createMemo, createSignal, Show } from "solid-js"
 import { TreeSync } from "../client/sync.ts"
-import type { AgentView } from "../plugin/live.ts"
 import { definition } from "../plugin/rpc-def.ts"
 import { Panel } from "./panel.tsx"
 import {
@@ -22,6 +21,11 @@ import {
   isActive,
   isOpen,
   notifyFinished,
+  PICKER_ACTIONS,
+  pickerAction,
+  pickerCurrent,
+  pickerOptions,
+  pickerSearch,
   rowsFor,
   targetFor,
   TreeStore,
@@ -29,6 +33,8 @@ import {
   type ControlRequest,
   type Expanded,
   type Filter,
+  type PickerKey,
+  type PickerValue,
 } from "./store.ts"
 
 export const PANEL = "workflows"
@@ -55,6 +61,8 @@ const plugin = {
     const [available, setAvailable] = createSignal(false)
     const [status, setStatus] = createSignal("")
     const [now, setNow] = createSignal(Date.now())
+    /** Key of the row selected in the panel (kept here so the agent dialog can start on it). */
+    const [selected, setSelected] = createSignal<string | null>(null)
     const expanded: Expanded = new Map()
     const cleanups: (() => void)[] = []
 
@@ -176,33 +184,28 @@ const plugin = {
       }, 50)
     }
 
-    /** <leader>j: message the agent selected in the panel, or pick a running agent. */
-    const messageAgent = async () => {
-      const running: AgentView[] = []
-      for (const r of tree.visibleRuns(filter())) {
-        if (!isActive(r)) continue
-        for (const a of tree.agentsOf(r.runId)) if (a.status === "running" || a.status === "queued") running.push(a)
+    /**
+     * <leader>j (X25): one searchable dialog of the running and queued agents. Enter steers the
+     * highlighted agent; ctrl+u (urgent steer), ctrl+d (stop) and ctrl+o (open) are footer actions.
+     * An action does not close the dialog, but the prompt or confirm it shows replaces it.
+     */
+    const agentDialog = async () => {
+      const options = pickerOptions(tree, filter())
+      if (!options.length) return toast("No running workflow agent", "info")
+      const act = (value: PickerValue, key: PickerKey) => {
+        const a = pickerAction(tree, value, key)
+        if (a.type === "open") ctx.ui.dialog.clear()
+        void runAction(a)
       }
-      if (!running.length) return toast("No running workflow agent to message", "info")
-      const picked: AgentView | undefined =
-        running.length === 1
-          ? running[0]
-          : await ctx.ui.dialog.select({
-              title: "Message which agent?",
-              options: running.map((a) => ({
-                title: `#${a.index} ${a.label}`,
-                value: a,
-                description: `${a.status}${a.phase ? ` · ${a.phase}` : ""}`,
-                category: tree.runs.get(a.runId)?.workflowName ?? a.runId,
-              })),
-            })
-      if (!picked) return
-      await runAction({
-        type: "prompt",
-        title: `Message #${picked.index} ${picked.label}`,
-        description: "Read at the agent's next step boundary, without restarting it.",
-        control: { runId: picked.runId, action: "message", agentIndex: picked.index, urgent: false },
+      const picked = await ctx.ui.dialog.select({
+        title: "Workflow agents",
+        placeholder: "#index, label, phase, workflow or run id",
+        options,
+        current: pickerCurrent(options, selected()),
+        search: pickerSearch,
+        actions: PICKER_ACTIONS.map((a) => ({ bind: a.bind, title: a.title, onTrigger: (v: PickerValue) => act(v, a.key) })),
       })
+      if (picked) await runAction(pickerAction(tree, picked, "steer"))
     }
 
     // ---- surfaces -----------------------------------------------------------------------------
@@ -264,6 +267,8 @@ const plugin = {
               rows={rows}
               now={now}
               status={status}
+              selected={selected}
+              select={setSelected}
               scopeLabel={() => (allRuns() ? "all runs of this project (a: this session)" : "this session (a: all runs)")}
               run={(a) => void runAction(a)}
             />
@@ -289,11 +294,11 @@ const plugin = {
               },
               {
                 id: "workflows.message",
-                title: "Workflows: message a running agent",
+                title: "Workflows: agents (steer, stop, open)",
                 group: "Workflows",
                 bind: "<leader>j",
                 palette: true,
-                run: () => void messageAgent(),
+                run: () => void agentDialog(),
               },
             ],
           }))

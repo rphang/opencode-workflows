@@ -416,6 +416,100 @@ export function actionFor(row: Row | undefined, key: string): Action | null {
   }
 }
 
+// ---- agent dialog (X25) --------------------------------------------------------------------------
+
+/** Which agent a dialog option stands for (compared by value: a fresh object matches). */
+export interface PickerValue {
+  runId: string
+  index: number
+}
+
+/** One option of the agent dialog: the host's select-option fields plus what search looks at. */
+export interface PickerOption {
+  title: string
+  value: PickerValue
+  description: string
+  category: string
+  label: string
+  phase: string | null
+  workflow: string
+  runId: string
+}
+
+/** What the dialog can do with the highlighted agent: Enter steers, the footer actions do the rest. */
+export type PickerKey = "steer" | "urgent" | "stop" | "open"
+
+/** Footer actions of the agent dialog (ctrl+n / ctrl+p stay free: the list uses them to move). */
+export const PICKER_ACTIONS: readonly { key: Exclude<PickerKey, "steer">; bind: string; title: string }[] = [
+  { key: "urgent", bind: "ctrl+u", title: "urgent steer" },
+  { key: "stop", bind: "ctrl+d", title: "stop" },
+  { key: "open", bind: "ctrl+o", title: "open" },
+]
+
+const isLiveAgent = (a: AgentView) => a.status === "running" || a.status === "queued"
+
+/** The running and queued agents of the active runs the filter shows (newest run first, then by index). */
+export function pickerOptions(s: TreeStore, f: Filter): PickerOption[] {
+  const out: PickerOption[] = []
+  for (const r of s.visibleRuns(f)) {
+    if (!isActive(r)) continue
+    for (const a of s.agentsOf(r.runId)) {
+      if (!isLiveAgent(a)) continue
+      out.push({
+        title: `#${a.index} ${a.label}`,
+        value: { runId: r.runId, index: a.index },
+        description: [a.status, a.phase, a.model].filter(Boolean).join(" · "),
+        category: r.workflowName || r.runId,
+        label: a.label,
+        phase: a.phase,
+        workflow: r.workflowName,
+        runId: r.runId,
+      })
+    }
+  }
+  return out
+}
+
+/** The option of the row selected in the panel (an agent row), if the dialog lists it. */
+export function pickerCurrent(options: readonly PickerOption[], rowKey: string | null | undefined): PickerValue | undefined {
+  if (!rowKey) return undefined
+  return options.find((o) => agentKey(o.value.runId, o.value.index) === rowKey)?.value
+}
+
+/**
+ * The dialog's search: `#3` or `3` lists the agents with that index first, then those whose label
+ * starts with the query, then those whose label, phase, workflow name or run id contains it
+ * (case-insensitive). An empty query lists every option in order.
+ */
+export function pickerSearch<O extends Pick<PickerOption, "value" | "title"> & Partial<PickerOption>>(query: string, options: readonly O[]): O[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return [...options]
+  const label = (o: O) => (o.label ?? o.title.replace(/^#\d+\s*/, "")).toLowerCase()
+  const index = /^#?(\d+)$/.exec(q)
+  const out: O[] = []
+  const add = (pred: (o: O) => boolean) => {
+    for (const o of options) if (!out.includes(o) && pred(o)) out.push(o)
+  }
+  if (index) add((o) => o.value.index === Number(index[1]))
+  add((o) => label(o).startsWith(q))
+  add((o) => [label(o), o.phase ?? "", o.workflow ?? o.category ?? "", o.runId ?? o.value.runId].some((t) => t.toLowerCase().includes(q)))
+  return out
+}
+
+const PICKER_ROW_KEY: Record<PickerKey, string> = { steer: "m", urgent: "M", stop: "x", open: "return" }
+
+/**
+ * What a dialog key does for an agent, from its current row in the tree (it may have finished, or
+ * gone, since the dialog opened): the same actions as the panel's m / M / x / Enter.
+ */
+export function pickerAction(s: TreeStore, value: PickerValue, key: PickerKey): Action {
+  const run = s.runs.get(value.runId)
+  const agent = s.agents.get(value.runId)?.get(value.index)
+  if (!run || !agent) return { type: "toast", message: `#${value.index} of ${value.runId} is no longer listed`, variant: "info" }
+  const row: Row = { kind: "agent", key: agentKey(run.runId, agent.index), run, agent, last: true, phaseLast: true }
+  return actionFor(row, PICKER_ROW_KEY[key]) ?? { type: "toast", message: `#${agent.index} is ${agent.status}`, variant: "info" }
+}
+
 // ---- Location target -----------------------------------------------------------------------------
 
 export type Route = { type: "home" } | { type: "session"; sessionID: string } | { type: string; [k: string]: unknown }

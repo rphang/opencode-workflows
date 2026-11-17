@@ -6,10 +6,114 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { listErrorKind, retryDelay } from "../../src/client/sync.ts"
-import { driver, run, tick } from "../helpers/fake-tree-rpc.ts"
+import { agentKey, PICKER_ACTIONS, pickerAction, pickerCurrent, pickerOptions, pickerSearch, runKey, TreeStore } from "../../src/tui/store.ts"
+import { agent, DIR, driver, run, S, tick } from "../helpers/fake-tree-rpc.ts"
 
 const root = join(import.meta.dir, "..", "..")
 const UNAVAILABLE = { type: "rpc.unavailable", message: "RPC is unavailable: dynamic-workflows" }
+
+function treeOf(runs = [run()], agents = [agent(0)]) {
+  const s = new TreeStore()
+  s.replace({ seq: 1, runs, agents })
+  return s
+}
+
+describe("X25 agent dialog", () => {
+  const runs = [
+    run({ runId: "wf_old", workflowName: "review", startedAt: 1 }),
+    run({ runId: "wf_new", workflowName: "deep-research", startedAt: 5 }),
+    run({ runId: "wf_done", status: "completed", startedAt: 9 }),
+    run({ runId: "wf_other", parentSessionID: "ses_other", startedAt: 7 }),
+  ]
+  const agents = [
+    agent(3, { runId: "wf_new", label: "payments api", phase: "Research", model: "openai/gpt-5.4-mini" }),
+    agent(1, { runId: "wf_new", label: "auth flows", phase: "Research", status: "queued", sessionID: null }),
+    agent(2, { runId: "wf_new", label: "done one", status: "completed" }),
+    agent(0, { runId: "wf_old", label: "lint", phase: null }),
+    agent(0, { runId: "wf_done", label: "finished run agent", status: "running" }),
+    agent(0, { runId: "wf_other", label: "someone else" }),
+  ]
+  const s = treeOf(runs, agents)
+  const f = { directory: DIR, sessionID: S }
+
+  test("X25 options: the running and queued agents of the visible active runs (newest run first), `#i label`, `status · phase · model`, by workflow", () => {
+    const options = pickerOptions(s, f)
+    expect(options.map((o) => o.value)).toEqual([
+      { runId: "wf_new", index: 1 },
+      { runId: "wf_new", index: 3 },
+      { runId: "wf_old", index: 0 },
+    ])
+    expect(options[1]).toMatchObject({
+      title: "#3 payments api",
+      description: "running · Research · openai/gpt-5.4-mini",
+      category: "deep-research",
+    })
+    expect(options[0]!.description).toBe("queued · Research")
+    expect(options[2]!.description).toBe("running")
+    // The whole Location (the `a` scope) adds the other session's run.
+    expect(pickerOptions(s, { directory: DIR, sessionID: null }).map((o) => o.value.runId)).toContain("wf_other")
+    expect(pickerOptions(treeOf([run({ status: "completed" })]), f)).toEqual([])
+  })
+
+  test("X25 the panel's selected agent is the dialog's current option; other rows select nothing", () => {
+    const options = pickerOptions(s, f)
+    expect(pickerCurrent(options, agentKey("wf_new", 3))).toEqual({ runId: "wf_new", index: 3 })
+    expect(pickerCurrent(options, agentKey("wf_new", 2))).toBeUndefined()
+    expect(pickerCurrent(options, runKey("wf_new"))).toBeUndefined()
+    expect(pickerCurrent(options, null)).toBeUndefined()
+  })
+
+  test("X25 search: `#3` or `3` matches that index first, then label prefixes, then substrings of label, phase, workflow and run id", () => {
+    const many = treeOf(
+      [run({ runId: "wf_x3", workflowName: "audit" })],
+      [
+        agent(0, { runId: "wf_x3", label: "agent three", phase: "Scan" }),
+        agent(3, { runId: "wf_x3", label: "payments", phase: "Scan" }),
+        agent(5, { runId: "wf_x3", label: "3d renderer", phase: "Build" }),
+        agent(13, { runId: "wf_x3", label: "routes", phase: "Build" }),
+      ],
+    )
+    const options = pickerOptions(many, f)
+    const idx = (q: string) => pickerSearch(q, options).map((o) => o.value.index)
+    expect(idx("")).toEqual([0, 3, 5, 13])
+    expect(idx("#3")).toEqual([3])
+    // `3`: index 3, then the label starting with 3, then every option whose run id contains 3.
+    expect(idx("3")).toEqual([3, 5, 0, 13])
+    expect(idx("PAY")).toEqual([3])
+    expect(idx("ag")).toEqual([0])
+    expect(idx("build")).toEqual([5, 13])
+    expect(idx("audit")).toEqual([0, 3, 5, 13])
+    expect(idx("nothing")).toEqual([])
+  })
+
+  test("X25 Enter steers, ctrl+u steers urgently, ctrl+d stops after a confirm, ctrl+o opens; each re-reads the agent's current row", () => {
+    const t = treeOf([run()], [agent(3, { label: "payments api" }), agent(4, { status: "queued", sessionID: null })])
+    const v = { runId: "wf_ab12", index: 3 }
+    expect(pickerAction(t, v, "steer")).toMatchObject({ type: "prompt", title: "Message #3 payments api", control: { action: "message", agentIndex: 3, urgent: false } })
+    expect(pickerAction(t, v, "urgent")).toMatchObject({ type: "prompt", control: { agentIndex: 3, urgent: true } })
+    expect(pickerAction(t, v, "stop")).toMatchObject({ type: "confirm", control: { action: "stop_agent", agentIndex: 3 } })
+    expect(pickerAction(t, v, "open")).toEqual({ type: "open", sessionID: "ses_c3" })
+    expect(pickerAction(t, { runId: "wf_ab12", index: 4 }, "open")).toEqual({ type: "toast", message: "#4 has no session yet (it is queued)", variant: "info" })
+    // The agent finished while the dialog was open: the existing toast, no prompt.
+    t.apply({ seq: 2, runs: [], agents: [agent(3, { label: "payments api", status: "completed" })] })
+    expect(pickerAction(t, v, "steer")).toMatchObject({ type: "toast", message: "#3 is completed; only running or queued agents get messages" })
+    expect(pickerAction(t, v, "stop")).toMatchObject({ type: "toast", message: "#3 is completed" })
+    // Gone from the tree (another scope, resync): a toast.
+    expect(pickerAction(t, { runId: "wf_gone", index: 0 }, "steer")).toMatchObject({ type: "toast", message: "#0 of wf_gone is no longer listed" })
+  })
+
+  test("X25 the footer actions are ctrl+u (urgent), ctrl+d (stop) and ctrl+o (open), never ctrl+n / ctrl+p (list navigation)", () => {
+    expect(PICKER_ACTIONS.map((a) => [a.key, a.bind])).toEqual([
+      ["urgent", "ctrl+u"],
+      ["stop", "ctrl+d"],
+      ["open", "ctrl+o"],
+    ])
+    for (const a of PICKER_ACTIONS) expect(a.bind).not.toMatch(/ctrl\+[np]\b/)
+    const src = readFileSync(join(root, "src", "tui", "index.tsx"), "utf8")
+    expect(src).toMatch(/search: pickerSearch/)
+    expect(src).toMatch(/PICKER_ACTIONS\.map/)
+  })
+})
 
 describe("X27 cold-start resync", () => {
   test("X27 retryDelay: 250, 500, 1000, 2000, 4000 ms, then null (give up)", () => {
