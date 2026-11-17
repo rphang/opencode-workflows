@@ -83,6 +83,9 @@ const plugin = {
     const resync = () => sync.resync()
     sync.start()
     cleanups.push(() => sync.dispose())
+    // A plugin was (re)loaded or changed: start over (X27; a cold start may have given up already).
+    const offPlugins = ctx.data?.on?.("plugin.updated", () => void sync.refresh())
+    if (typeof offPlugins === "function") cleanups.push(offPlugins)
 
     // Resync when the viewed session (and so the target) or the scope changes, and periodically
     // while a run is active (missed events, reconnects).

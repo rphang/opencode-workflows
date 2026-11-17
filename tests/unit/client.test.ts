@@ -4,58 +4,12 @@
 import { describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import type { AgentView, RunView } from "../../src/plugin/live.ts"
 import * as tree from "../../src/client/tree.ts"
-import { TreeSync, type SyncRpc } from "../../src/client/sync.ts"
 import * as store from "../../src/tui/store.ts"
+import { agent, DIR, driver, run, S, tick } from "../helpers/fake-tree-rpc.ts"
 
-const { acceptRun, finishMessage, TreeStore } = tree
+const { acceptRun, finishMessage } = tree
 const ROOT = join(import.meta.dir, "..", "..")
-const DIR = "/work/proj"
-const S = "ses_parent"
-
-function run(over: Partial<RunView> = {}): RunView {
-  return {
-    runId: "wf_ab12",
-    workflowName: "deep-research",
-    description: "d",
-    status: "running",
-    parentSessionID: S,
-    directory: DIR,
-    startedAt: 0,
-    endedAt: null,
-    agents: { total: 2, done: 0, running: 2, queued: 0 },
-    tokens: 0,
-    cost: 0,
-    phases: [],
-    ungrouped: null,
-    steeredAgents: 0,
-    warnings: 0,
-    error: null,
-    ...over,
-  }
-}
-
-function agent(index: number, over: Partial<AgentView> = {}): AgentView {
-  return {
-    runId: "wf_ab12",
-    index,
-    label: `agent ${index}`,
-    phase: null,
-    status: "running",
-    sessionID: `ses_c${index}`,
-    model: null,
-    tokens: 0,
-    cost: 0,
-    startedAt: 0,
-    endedAt: null,
-    activity: null,
-    messages: { sent: 0, delivered: 0, held: 0 },
-    worktree: null,
-    error: null,
-    ...over,
-  }
-}
 
 describe("src/client/tree.ts", () => {
   test("the TUI store re-exports the shared client logic (same functions, so existing imports keep working)", () => {
@@ -94,58 +48,6 @@ describe("src/client/tree.ts", () => {
 })
 
 // ---- the resync driver -----------------------------------------------------------------------------
-
-function fakeRpc() {
-  const calls: { input: any; options: any; resolve: (v: unknown) => void; reject: (e: unknown) => void }[] = []
-  const handlers = new Map<string, (e: any) => void>()
-  const rpc: SyncRpc = {
-    list: (input, options) => new Promise((resolve, reject) => calls.push({ input, options, resolve, reject })),
-    events: {
-      on: (name, h) => {
-        handlers.set(name, h)
-        return () => void handlers.delete(name)
-      },
-    },
-  }
-  const emit = (name: string, data: unknown, directory = DIR) => handlers.get(name)?.({ location: { directory }, data })
-  return { rpc, calls, emit, handlers }
-}
-
-function fakeTimers() {
-  const timers: { fn: () => void; ms: number; cancelled: boolean }[] = []
-  const schedule = (fn: () => void, ms: number) => {
-    const t = { fn, ms, cancelled: false }
-    timers.push(t)
-    return () => void (t.cancelled = true)
-  }
-  const pending = () => timers.filter((t) => !t.cancelled)
-  const fire = () => {
-    const t = pending()[0]
-    if (!t) throw new Error("no timer")
-    t.cancelled = true
-    t.fn()
-    return t.ms
-  }
-  return { schedule, pending, fire }
-}
-
-const tick = () => new Promise((r) => setTimeout(r, 0))
-
-function driver(target = { directory: DIR, sessionID: S as string | null }) {
-  const f = fakeRpc()
-  const timers = fakeTimers()
-  const finished: unknown[] = []
-  let changes = 0
-  const t = { ...target }
-  const sync = new TreeSync({
-    rpc: f.rpc,
-    target: () => t,
-    onChange: () => void changes++,
-    onFinished: (e) => void finished.push(e),
-    schedule: timers.schedule,
-  })
-  return { ...f, sync, timers, finished, target: t, changes: () => changes }
-}
 
 describe("src/client/sync.ts", () => {
   test("one list at a time: deltas that arrive while it is in flight are replayed over its result", async () => {
@@ -223,14 +125,16 @@ describe("src/client/sync.ts", () => {
     expect(d.calls[1]!.input).toEqual({ sessionID: "ses_two" })
   })
 
-  test("a list that throws (rpc.unavailable) marks the RPC unavailable and points to /workflows", async () => {
+  test("a list that throws (rpc.unavailable) marks the RPC unavailable and schedules a retry; dispose cancels it", async () => {
     const d = driver()
     d.sync.start()
     d.calls[0]!.reject({ type: "rpc.unavailable", message: "RPC is unavailable: dynamic-workflows" })
     await tick()
     expect(d.sync.available).toBe(false)
-    expect(d.sync.state).toBe("unavailable")
-    expect(d.sync.status).toBe("workflows RPC unavailable (RPC is unavailable: dynamic-workflows); use /workflows")
+    expect(d.sync.state).toBe("loading")
+    expect(d.timers.pending()).toHaveLength(1)
+    d.sync.dispose()
+    expect(d.timers.pending()).toHaveLength(0)
   })
 
   test("a list answered {ok:false} shows its message; dispose unsubscribes and cancels timers", async () => {
