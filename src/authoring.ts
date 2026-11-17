@@ -36,6 +36,9 @@ deciding the next.
   and objects as real JSON values — \`args: ["a.ts", "b.ts"]\`, NOT \`args: "[\\"a.ts\\"]"\` (a stringified
   list reaches the script as one string and \`args.map\` throws).
 - \`resumeFromRunId\`: relaunch a previous run, reusing its cached agent results (see Resume).
+- If a \`workflow_script\` tool is offered, send a NEW inline script through it as raw text: its whole
+  input is the script source, starting with \`export const meta\`, with no code fence and no JSON wrapper.
+  Use the \`workflow\` tool for \`scriptPath\`, \`name\`, \`args\`, \`resumeFromRunId\` or a budget.
 
 The tool returns immediately with \`{status: "async_launched", runId, taskId, scriptPath, transcriptDir}\`.
 If the script fails its syntax/meta check the result carries \`error\` and nothing runs — fix and relaunch.

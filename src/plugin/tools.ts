@@ -1,5 +1,5 @@
-// Tool definitions: `workflow` (P01–P06) and `workflow_control` (P50–P52). `workflow_submit` comes
-// from src/opencode/submit.ts.
+// Tool definitions: `workflow` (P01–P06), the freeform `workflow_script` (X24) and `workflow_control`
+// (P50–P52). `workflow_submit` comes from src/opencode/submit.ts.
 
 import type { Plugin } from "@opencode/plugin"
 import { TOOL_DESCRIPTION } from "../authoring.ts"
@@ -133,10 +133,71 @@ export function createWorkflowTool(host: WorkflowHost, description: string = TOO
     description,
     input: WORKFLOW_INPUT_SCHEMA as any,
     options: { codemode: false },
+    execute: async (input: any, tctx) => launchResult(host, (input ?? {}) as WorkflowToolInput, tctx),
+  }
+}
+
+/** X24: launch a NEW inline script as raw text (freeform tool input, opencode 2.3.0). */
+export const SCRIPT_TOOL_NAME = "workflow_script"
+
+/**
+ * Exactly one required string property: opencode refuses a freeform tool otherwise (upstream
+ * packages/ai ToolDefinition.freeformField). Models without the freeform capability get it as an
+ * ordinary JSON tool; either way execute receives `{script}`.
+ */
+export const SCRIPT_INPUT_SCHEMA = {
+  type: "object",
+  properties: { script: { type: "string" } },
+  required: ["script"],
+} as const
+
+export const SCRIPT_TOOL_DESCRIPTION =
+  "Launch a NEW dynamic workflow from inline script text. Equivalent to the `workflow` tool called with only " +
+  "{script}; all of its rules apply: explicit user opt-in only, end your turn after launching, and the result " +
+  "arrives as a task notification. Send the script source exactly as written, starting with " +
+  "`export const meta = {...}`, with no code fence and no JSON or other wrapper. For args, name, scriptPath, " +
+  "resumeFromRunId or a user-stated budget, use the `workflow` tool."
+
+export const SCRIPT_EXTRA_KEY_ERROR =
+  "workflow_script takes only the script; use the workflow tool for args, name, scriptPath, resumeFromRunId or budget"
+
+const WRAPPING_FENCE = /^\s*```[\w.+-]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```\s*$/
+
+/** The text inside a single code fence that wraps the whole input; any other text unchanged. */
+export function stripWrappingFence(text: string): string {
+  const m = WRAPPING_FENCE.exec(text)
+  return m ? m[1]! : text
+}
+
+async function launchResult(host: WorkflowHost, input: WorkflowToolInput, tctx: { sessionID: unknown; agent?: unknown }) {
+  const agent = typeof tctx.agent === "string" && tctx.agent ? tctx.agent : undefined
+  const out = await host.launch(input, String(tctx.sessionID), { agent })
+  return { content: JSON.stringify(out, null, 2), metadata: { ...out } }
+}
+
+/**
+ * `workflow_script` (X24). Its permission key is `workflow` (`options.permission`; opencode hides a tool
+ * whose key is wholly denied), so every deny of the `workflow` tool (child sessions P60, user and agent
+ * rules) hides this one too.
+ */
+export function createScriptTool(host: WorkflowHost): ToolInfo {
+  return {
+    name: SCRIPT_TOOL_NAME,
+    description: SCRIPT_TOOL_DESCRIPTION,
+    input: SCRIPT_INPUT_SCHEMA as any,
+    freeform: { type: "text" },
+    options: { codemode: false, permission: WORKFLOW_TOOL_NAME },
     execute: async (input: any, tctx) => {
-      const agent = typeof tctx.agent === "string" && tctx.agent ? tctx.agent : undefined
-      const out = await host.launch((input ?? {}) as WorkflowToolInput, String(tctx.sessionID), { agent })
-      return { content: JSON.stringify(out, null, 2), metadata: { ...out } }
+      const given: Record<string, unknown> = typeof input === "string" ? { script: input } : input && typeof input === "object" ? input : {}
+      // A JSON call (a model without freeform input) can carry more keys: they belong to `workflow`.
+      const refuse = (error: string) => {
+        const out = { status: "async_launched", taskType: "local_workflow", error }
+        return { content: JSON.stringify(out, null, 2), metadata: { ...out } }
+      }
+      if (Object.keys(given).some((k) => k !== "script" && given[k] !== undefined && given[k] !== null)) return refuse(SCRIPT_EXTRA_KEY_ERROR)
+      const script = typeof given.script === "string" ? stripWrappingFence(given.script) : ""
+      if (!script.trim()) return refuse("workflow_script needs the script source as its input (starting with `export const meta = {...}`)")
+      return launchResult(host, { script }, tctx)
     },
   }
 }

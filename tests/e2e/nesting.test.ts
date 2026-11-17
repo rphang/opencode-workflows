@@ -65,6 +65,7 @@ describe.skipIf(!e2eEnabled())("e2e nesting", () => {
       const msgs = await server.messages(project, childID)
       const tools = toolParts(msgs).map((p) => p.name)
       expect(tools).not.toContain("workflow")
+      expect(tools).not.toContain("workflow_script")
       expect(tools).not.toContain("workflow_control")
       expect(existsSync(join(server.dataRoot, childID))).toBe(false)
       const text = msgs.filter((m) => m.type === "assistant").map(assistantText).join("\n")

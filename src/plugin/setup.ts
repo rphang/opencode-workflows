@@ -6,6 +6,7 @@ import { join } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { listWorkflows, personalWorkflowsDir, projectWorkflowDirs, type RegistryOptions } from "../registry.ts"
 import { createOpencodeRunner } from "../opencode/runner.ts"
+import { createFreeformToolFilter } from "../opencode/freeform.ts"
 import { createChildAskGuard, effectiveSessionRules } from "../opencode/permissions.ts"
 import { createSubmitRegistry, createSubmitTool, type SubmitRegistry } from "../opencode/submit.ts"
 import { RunStore } from "../store.ts"
@@ -14,12 +15,22 @@ import { addCommands } from "./commands.ts"
 import { largeWorkflowThreshold, resolveSizeGuideline, sizeGuidelineAdvice } from "./guideline.ts"
 import { WorkflowHost } from "./host.ts"
 import { LiveRuntime } from "./rpc.ts"
-import { CONTROL_TOOL_NAME, createControlTool, createWorkflowTool, WORKFLOW_TOOL_NAME, workflowToolDescription } from "./tools.ts"
+import {
+  CONTROL_TOOL_NAME,
+  createControlTool,
+  createScriptTool,
+  createWorkflowTool,
+  SCRIPT_TOOL_NAME,
+  WORKFLOW_TOOL_NAME,
+  workflowToolDescription,
+} from "./tools.ts"
 
 export const PLUGIN_ID = "dynamic-workflows"
 export const DISABLE_ENV = "OPENCODE_DISABLE_WORKFLOWS"
 /** `0`/`false`/`no`/`off` makes the live tree's RPC read-only (X17). */
 export const RPC_CONTROL_ENV = "OPENCODE_WORKFLOW_RPC_CONTROL"
+/** `0`/`false`/`no`/`off` registers no freeform `workflow_script` tool (X24). */
+export const FREEFORM_ENV = "OPENCODE_WORKFLOW_FREEFORM"
 
 /** Injection seams (tests) and host overrides. Everything is optional. */
 export interface PluginDeps {
@@ -48,6 +59,14 @@ export function rpcControlEnabled(env: Record<string, string | undefined>, optio
   const raw = env[RPC_CONTROL_ENV]
   if (raw !== undefined && FALSY.test(raw.trim())) return false
   const opt = options?.rpcControl
+  return !(opt === false || (typeof opt === "string" && FALSY.test(opt.trim())))
+}
+
+/** X24: `workflow_script` is registered unless env OPENCODE_WORKFLOW_FREEFORM is falsy or option `freeformTool` is false. */
+export function freeformToolEnabled(env: Record<string, string | undefined>, options: Record<string, unknown> | undefined): boolean {
+  const raw = env[FREEFORM_ENV]
+  if (raw !== undefined && FALSY.test(raw.trim())) return false
+  const opt = options?.freeformTool
   return !(opt === false || (typeof opt === "string" && FALSY.test(opt.trim())))
 }
 
@@ -82,6 +101,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
         deniedTools: [WORKFLOW_TOOL_NAME, CONTROL_TOOL_NAME],
       }))
 
+  const freeform = freeformToolEnabled(env, options)
   const sizeGuideline = resolveSizeGuideline(env, options)
   const sizeAdvice = sizeGuidelineAdvice(sizeGuideline)
 
@@ -153,10 +173,15 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
           saved = listWorkflows(cwd, registryOptions)
         } catch {}
         editor.add(createWorkflowTool(host, workflowToolDescription({ saved, sizeAdvice })))
+        if (freeform) editor.add(createScriptTool(host))
         editor.add(createControlTool(host))
         editor.add(createSubmitTool(submitRegistry))
       }),
     )
+    // X24: models that cannot send freeform text would only see a JSON duplicate of `workflow {script}`.
+    if (freeform && typeof (ctx.session as any).hook === "function") {
+      registrations.push(await ctx.session.hook("context", createFreeformToolFilter(ctx, SCRIPT_TOOL_NAME)))
+    }
     registrations.push(
       await ctx.command.transform((editor) => {
         addCommands(editor, {

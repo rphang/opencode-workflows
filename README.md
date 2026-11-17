@@ -79,6 +79,10 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 
 - **`workflow` tool** with the same script API as Claude Code's workflow tool: `agent()`,
   `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget` and nested `workflow()`.
+- **Raw-text scripts (extension).** On models whose capabilities list freeform text input (opencode
+  2.3+), a `workflow_script` tool takes a new inline script as plain text instead of a JSON-escaped
+  string. It is the `workflow` tool with only `{script}`, under the same permission; the `workflow`
+  tool itself is unchanged. Turn it off with `freeformTool: false` or `OPENCODE_WORKFLOW_FREEFORM=0`.
 - **Structured output.** `agent(prompt, { schema })` resolves to a JSON object validated against
   your JSON Schema, and the agent retries when its output doesn't match.
 - **Background runs.** The tool returns immediately. The result comes back as a task notification
@@ -469,6 +473,7 @@ Plugin options (config install only, see [Install](#other-options)):
 | `disabled: true` | Registers no tools or commands. |
 | `sizeGuideline` | `unrestricted`, `small`, `medium` (default) or `large`: tells the model to aim for fewer than ∞, 5, 10 or 50 agents. |
 | `dataDir` | Where run transcripts are stored. Takes precedence over `OPENCODE_WORKFLOW_DATA_DIR`. |
+| `freeformTool: false` | Registers no `workflow_script` tool: the model launches new inline scripts with the `workflow` tool only. |
 | `rpcControl: false` | Makes the live tree's RPC read-only: the tree still shows runs, but its `x`, `p` and `m` keys (and any other RPC client) cannot stop, pause or message them. `/workflows msg` and `workflow_control` still work. See [Security model](#security-model). |
 
 ## Environment variables
@@ -482,6 +487,7 @@ Set them in the environment of the opencode server. They work with every install
 | `OPENCODE_WORKFLOW_SIZE_GUIDELINE` | `medium` | Same as the `sizeGuideline` option. The env var wins. |
 | `OPENCODE_WORKFLOW_AGENT_TIMEOUT_MS` | unset (no timeout) | Per-agent timeout. An agent that exceeds it fails, and `agent()` returns `null`. |
 | `MAX_STRUCTURED_OUTPUT_RETRIES` (or `OPENCODE_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES`) | `5` | Attempts a schema agent gets before `agent()` throws. |
+| `OPENCODE_WORKFLOW_FREEFORM` | unset (on) | `0`, `false`, `no` or `off` registers no `workflow_script` tool, like the `freeformTool: false` option. |
 | `OPENCODE_WORKFLOW_RPC_CONTROL` | unset (on) | `0`, `false`, `no` or `off` makes the live tree's RPC read-only, like the `rpcControl: false` option. |
 | `OPENCODE_WORKFLOW_DATA_DIR` | `$XDG_DATA_HOME/opencode/workflows`, else `%LOCALAPPDATA%\opencode\workflows` (Windows) or `~/.local/share/opencode/workflows` | Run transcripts, stored as `<dir>/<sessionID>/<runId>/`. The `dataDir` plugin option wins over it. |
 

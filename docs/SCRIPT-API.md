@@ -35,6 +35,11 @@ If the script fails its syntax or meta check, the result also has `error` set an
 Every launch persists the script and returns its path as `scriptPath`, so an edited copy can be
 relaunched with `{ scriptPath }`.
 
+`workflow_script` (extension, [PARITY](PARITY.md) X24) is the same launch with only `script`, for
+models that can send a tool's input as raw text: its whole input is the script source, with no JSON
+escaping. It is dropped for models whose capabilities do not list freeform text, and is turned off
+with the plugin option `freeformTool: false` or `OPENCODE_WORKFLOW_FREEFORM=0`.
+
 When the run finishes, stops or fails, its return value arrives in the parent session as a
 `<task-notification>`, with the status and usage (agent count, tokens, duration). That is the only
 way the result reaches the model. `workflow_control status` shows progress, never the result.

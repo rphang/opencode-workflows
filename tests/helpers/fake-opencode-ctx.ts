@@ -29,6 +29,7 @@
 //   const runner = createOpencodeRunner(fake.ctx as any, { parentSessionID: fake.parentID, runId: "r1", git: fake.git })
 
 import type { Tool } from "@opencode/schema/tool"
+import { evaluatePermission } from "../../src/opencode/permissions.ts"
 
 export interface FakeTurn {
   /** Final assistant text for this turn (omit for no text part). */
@@ -111,6 +112,22 @@ export interface FakeModel {
   variants?: string[]
   enabled?: boolean
   released?: number
+  /** models.dev `capabilities.freeform` (e.g. ["text"]); absent = JSON tools only. */
+  freeform?: string[]
+}
+
+/** The user's answer to a native permission prompt (fake `permission.assert`, 2.3.0). */
+export type FakePermissionReply = "once" | "always" | "reject" | { reject: string }
+
+/** A request `permission.assert` would show to the user (core/src/permission.ts `request`). */
+export interface FakePermissionRequest {
+  sessionID: string
+  agent?: string
+  action: string
+  resources: string[]
+  save?: string[]
+  metadata?: Record<string, unknown>
+  source?: { type: "tool"; messageID: string; id: string }
 }
 
 export interface FakeCtxOptions {
@@ -139,6 +156,11 @@ export interface FakeCtxOptions {
    * variant "default"); undefined = no model (get() shows none, like opencode's default model).
    */
   childModel?: (requested: any) => { providerID: string; id: string; variant?: string } | undefined
+  /**
+   * Installs `permission.assert` (opencode 2.3.0) and answers its prompts: called for every request
+   * whose rules (plus saved approvals and the evaluate hooks) say "ask". Absent = no `assert`.
+   */
+  permissionAsk?: (request: FakePermissionRequest) => FakePermissionReply | Promise<FakePermissionReply>
 }
 
 export interface FakeAgent {
@@ -180,7 +202,7 @@ function modelInfo(m: FakeModel) {
     modelID: m.modelID ?? m.id,
     providerID: m.providerID,
     name: m.id,
-    capabilities: {},
+    capabilities: m.freeform ? { freeform: [...m.freeform] } : {},
     variants: (m.variants ?? []).map((id) => ({ id })),
     time: { released: m.released ?? 0 },
     cost: [],
@@ -211,7 +233,14 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     submitResults: [] as { sessionID: string; result: Tool.Result }[],
     update: [] as any[],
     synthetic: [] as any[],
+    /** permission.assert inputs, and the requests among them that reached the user. */
+    assert: [] as FakePermissionRequest[],
+    asked: [] as FakePermissionRequest[],
   }
+  /** Approvals saved by an "always" reply (core: PermissionSaved, project-wide allow rules). */
+  const savedPermissions: { action: string; resource: string; effect: "allow" }[] = []
+  /** session.hook(name, cb) registrations (2.3.0 session hooks such as "context"). */
+  const sessionHooks: { name: string; cb: (event: any) => unknown }[] = []
   /** permission.hook("evaluate", cb) registrations (opencode runs them on every rule evaluation). */
   const permissionHooks: { name: string; cb: (event: any) => unknown }[] = []
   let seq = 0
@@ -443,6 +472,16 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         if (input.resume && !opts.ignoreWake && s.inbox.length) scheduleSuccessor(s)
         return { interrupted: false }
       },
+      async hook(name: string, cb: (event: any) => unknown) {
+        const entry = { name, cb }
+        sessionHooks.push(entry)
+        return {
+          dispose: async () => {
+            const i = sessionHooks.indexOf(entry)
+            if (i >= 0) sessionHooks.splice(i, 1)
+          },
+        }
+      },
       async synthetic(input: { sessionID: string; text: string; description?: string; metadata?: any; delivery?: string; resume?: boolean }) {
         calls.synthetic.push(input)
         const s = need(input.sessionID)
@@ -478,6 +517,37 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
         throw new Error(`Permission request not found: ${input.requestID}`)
       },
       async reply() {},
+      // opencode 2.3.0 `permission.assert`, only when `permissionAsk` is given. Mirrors
+      // core/src/permission.ts assert + plugin/host.ts: a configured deny (agent rules, then session
+      // rules) or a hook's deny rejects with a Tool.Error; saved approvals count after that check; an
+      // "ask" goes to the user, whose plain reject is a Permission.DeclinedError defect.
+      ...(opts.permissionAsk
+        ? {
+            async assert(input: FakePermissionRequest) {
+              calls.assert.push(structuredClone(input))
+              const toolError = (message: string) => Object.assign(new Error(message), { _tag: "Tool.Error" })
+              const s = sessions.get(input.sessionID)
+              if (!s) throw toolError(`Session not found: ${input.sessionID}`)
+              const agentID = input.agent ?? s.info.agent
+              const agent = agentID ? (opts.agents ?? DEFAULT_AGENTS).find((a) => a.id === agentID) : undefined
+              const rules = [...(agent?.permissions ?? []), ...((s.info.permissions as any[]) ?? [])]
+              if (input.resources.some((r) => evaluatePermission(input.action, r, rules) === "deny")) {
+                throw toolError(`The user has specified a rule which prevents you from using this specific tool call (${input.action})`)
+              }
+              const all = [...rules, ...savedPermissions]
+              const effect = input.resources.some((r) => evaluatePermission(input.action, r, all) === "ask") ? "ask" : "allow"
+              const event: any = { ...structuredClone(input), agent: input.agent, effect }
+              for (const h of permissionHooks) if (h.name === "evaluate") await h.cb(event)
+              if (event.effect === "deny") throw toolError(event.message ?? `Permission ${input.action} denied`)
+              if (event.effect === "allow") return
+              calls.asked.push(structuredClone(input))
+              const reply = await opts.permissionAsk!(structuredClone(input))
+              if (reply === "always") for (const resource of input.save ?? []) savedPermissions.push({ action: input.action, resource, effect: "allow" })
+              if (reply === "reject") throw Object.assign(new Error("Permission rejected"), { _tag: "Permission.DeclinedError" })
+              if (typeof reply === "object") throw toolError(reply.reject)
+            },
+          }
+        : {}),
     },
     agent: {
       async get(input: { agentID: string }) {
@@ -542,6 +612,13 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     calls,
     git,
     permissionHooks,
+    savedPermissions,
+    sessionHooks,
+    /** Runs every session.hook(name) callback on a draft of `event` (in place) and returns it. */
+    async triggerSessionHook(name: string, event: any) {
+      for (const h of sessionHooks) if (h.name === name) await h.cb(event)
+      return event
+    },
     /**
      * Mirrors core/src/permission.ts evaluateInput: the rule effect goes through every `evaluate`
      * hook, which may rewrite effect/message; returns the final event.
