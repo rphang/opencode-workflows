@@ -259,6 +259,8 @@ describe("P76 scriptPath approval through ctx.permission.assert", () => {
   const readAll = { action: "read", resource: "*", effect: "allow" }
 
   test("P76 an outside path asks for external_directory in the calling session, tied to the tool call; approving runs it", async () => {
+    // The plugin asks with the canonical spelling (realpathSync.native: Windows 8.3 short names such
+    // as RUNNER~1 expanded); plain realpathSync keeps them, so the expectation uses .native too.
     const file = writeOutside("approved")
     const p = await h.setup({ fake: { permissionAsk: () => "once", parent: { permissions: [readAll] } } })
     const out = await p.call({ scriptPath: file })
@@ -270,8 +272,8 @@ describe("P76 scriptPath approval through ctx.permission.assert", () => {
       sessionID: SESSION,
       agent: "build",
       action: "external_directory",
-      resources: [slash(join(realpathSync(outsideDir()), "*"))],
-      save: [slash(join(realpathSync(outsideDir()), "*"))],
+      resources: [slash(join(realpathSync.native(outsideDir()), "*"))],
+      save: [slash(join(realpathSync.native(outsideDir()), "*"))],
       source: { type: "tool", messageID: "msg_1", id: "call_1" },
     })
     // The read check goes through opencode too (allowed by the read rule, so no second prompt).
