@@ -292,11 +292,15 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     /** permission.assert inputs, and the requests among them that reached the user. */
     assert: [] as FakePermissionRequest[],
     asked: [] as FakePermissionRequest[],
+    /** permission.reply inputs. */
+    permissionReply: [] as { sessionID: string; requestID: string; decision: string; message?: string }[],
     /** experimental.idle hook invocations (one per registered hook). */
     idleHook: [] as { sessionID: string; directory: string }[],
   }
   /** Approvals saved by an "always" reply (core: PermissionSaved, project-wide allow rules). */
   const savedPermissions: { action: string; resource: string; effect: "allow" }[] = []
+  /** Prompts shown by permission.assert and not answered yet (core: Permission pending map). */
+  const pendingPermissions = new Map<string, { request: FakePermissionRequest & { id: string }; settle: (r: FakePermissionReply) => void }>()
   /** session.hook(name, cb) registrations (2.3.0 session hooks such as "context"). */
   const sessionHooks: { name: string; cb: (event: any) => unknown }[] = []
   /** permission.hook("evaluate", cb) registrations (opencode runs them on every rule evaluation). */
@@ -625,13 +629,26 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
           },
         }
       },
-      async list() {
-        return []
+      // Pending prompts of a session (core Permission.forSession).
+      async list(input?: { sessionID?: string }) {
+        return [...pendingPermissions.values()]
+          .filter((p) => !input?.sessionID || p.request.sessionID === input.sessionID)
+          .map((p) => structuredClone(p.request))
       },
       async get(input: { requestID: string }) {
-        throw new Error(`Permission request not found: ${input.requestID}`)
+        const p = pendingPermissions.get(input.requestID)
+        if (!p) throw new Error(`Permission request not found: ${input.requestID}`)
+        return structuredClone(p.request)
       },
-      async reply() {},
+      // core Permission.reply: a reject also rejects every other pending prompt of that session.
+      async reply(input: { sessionID: string; requestID: string; decision: "once" | "always" | "reject"; message?: string }) {
+        calls.permissionReply.push({ ...input })
+        const p = pendingPermissions.get(input.requestID)
+        if (!p || p.request.sessionID !== input.sessionID) throw new Error(`Permission request not found: ${input.requestID}`)
+        if (input.decision !== "reject") return p.settle(input.decision)
+        const reply: FakePermissionReply = input.message ? { reject: input.message } : "reject"
+        for (const q of [...pendingPermissions.values()]) if (q.request.sessionID === input.sessionID) q.settle(reply)
+      },
       // opencode 2.3.0 `permission.assert`, only when `permissionAsk` is given. Mirrors
       // core/src/permission.ts assert + plugin/host.ts: a configured deny (agent rules, then session
       // rules) or a hook's deny rejects with a Tool.Error; saved approvals count after that check; an
@@ -656,7 +673,14 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
               if (event.effect === "deny") throw toolError(event.message ?? `Permission ${input.action} denied`)
               if (event.effect === "allow") return
               calls.asked.push(structuredClone(input))
-              const reply = await opts.permissionAsk!(structuredClone(input))
+              // The prompt stays pending until the responder (the user) or permission.reply answers it.
+              const id = `per_${++seq}`
+              let settle!: (r: FakePermissionReply) => void
+              const answered = new Promise<FakePermissionReply>((r) => (settle = r))
+              pendingPermissions.set(id, { request: { ...structuredClone(input), id }, settle })
+              Promise.resolve(opts.permissionAsk!(structuredClone(input))).then(settle, () => {})
+              const reply = await answered
+              pendingPermissions.delete(id)
               if (reply === "always") for (const resource of input.save ?? []) savedPermissions.push({ action: input.action, resource, effect: "allow" })
               if (reply === "reject") throw Object.assign(new Error("Permission rejected"), { _tag: "Permission.DeclinedError" })
               if (typeof reply === "object") throw toolError(reply.reject)
@@ -760,6 +784,7 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     git,
     permissionHooks,
     savedPermissions,
+    pendingPermissions,
     /** The main instance's session.hook registrations (shared with the base ctx). */
     sessionHooks,
     /** Runs every session.hook(name) callback on a draft of `event` (in place) and returns it. */

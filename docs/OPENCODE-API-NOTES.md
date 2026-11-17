@@ -54,7 +54,12 @@ the 2.3.0 packages and `tsc` is clean against their types.
   rejection with feedback rejects with a `Tool.Error` (`_tag: "Tool.Error"`, `message`); a plain
   rejection rejects with the `Permission.DeclinedError` defect (`_tag: "Permission.DeclinedError"`),
   which a tool must rethrow so the step ends. `source: {type:"tool", messageID, id}` ties the prompt
-  to a tool call. There is no abort signal: a pending prompt stays until answered. P76 uses it.
+  to a tool call. There is no abort signal: the adapter runs it in its own fiber, and core drops a
+  pending prompt only when that fiber ends, so a prompt stays until answered even after the tool call
+  is cancelled. `permission.list({sessionID})` lists the session's pending requests (`{id, action,
+  resources, source?, metadata?, …}`) and `permission.reply({sessionID, requestID, decision:
+  "once"|"always"|"reject", message?})` answers one; a `reject` also rejects every other pending
+  request of that session. P76 uses assert, and list + reply to withdraw a prompt nobody waits on.
 - **Session `context` hook** (`ctx.session.hook("context", cb)`): runs before each primary model
   request with `{sessionID, agent, model: {providerID, id, variant?}, system, messages, options,
   tools: {[name]: {description, input}}}` (a copy); deleting a `tools` key drops that tool from the
