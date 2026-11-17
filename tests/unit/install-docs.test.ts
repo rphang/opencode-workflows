@@ -57,10 +57,17 @@ describe("plugin directory install", () => {
 })
 
 describe("TUI entry (live progress tree, X14)", () => {
-  test("the server entry never imports the TUI or its host modules (it loads without the TUI peers)", () => {
+  test("the server entry never imports the TUI, the companions' client logic or their host modules (it loads without the TUI peers)", () => {
     const offenders = walk(join(ROOT, "src"))
-      .filter((f) => !/[\\/]tui[\\/]/.test(f))
-      .filter((f) => /from ["'](solid-js|@opentui\/|\.\.?\/(\.\.\/)*tui\/)/.test(readFileSync(f, "utf8")))
+      .filter((f) => !/[\\/](tui|client)[\\/]/.test(f))
+      .filter((f) => /from ["'](solid-js|@opentui\/|\.\.?\/(\.\.\/)*(tui|client)\/)/.test(readFileSync(f, "utf8")))
+    expect(offenders).toEqual([])
+  })
+
+  test("the shared client logic (src/client) never imports the TUI, Solid, opentui or the plugin SDK (a GUI companion reuses it)", () => {
+    const files = walk(join(ROOT, "src", "client"))
+    expect(files.length).toBeGreaterThan(0)
+    const offenders = files.filter((f) => /from ["'](solid-js|@opentui\/|@opencode\/|\.\.?\/(\.\.\/)*tui\/)/.test(readFileSync(f, "utf8")))
     expect(offenders).toEqual([])
   })
 
@@ -80,6 +87,9 @@ describe("TUI entry (live progress tree, X14)", () => {
       expect(imports.filter((s) => !TUI_EXTERNALS.includes(s))).toEqual([])
       expect(code).not.toMatch(/function createSignal\(/)
       expect(code).toMatch(/dynamic-workflows\.tui/)
+      // The shared client logic (src/client) is bundled in, not imported at runtime.
+      expect(code).toMatch(/class TreeSync\b/)
+      expect(code).toMatch(/class TreeStore\b/)
       const entries = Host.resolve({ name: "@rphang/opencode-workflows", directory: tmp } as never)
       expect(String(entries.tui).replaceAll("\\", "/")).toMatch(/opencode-workflows\/dist\/tui\.js$/)
       expect(String(entries.server).replaceAll("\\", "/")).toMatch(/opencode-workflows\/dist\/index\.js$/)

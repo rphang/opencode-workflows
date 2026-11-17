@@ -2,7 +2,7 @@
 // keys (active only while the panel has focus). Every key goes through actionFor(), so the behavior is
 // the one unit-tested in tests/parity/tui.test.ts; this file only renders and dispatches.
 
-import { createMemo, createSignal, For, Show, type Accessor } from "solid-js"
+import { createMemo, For, Show, type Accessor } from "solid-js"
 import { actionFor, helpText, rowText, type Action, type Row } from "./store.ts"
 
 export interface PanelProps {
@@ -12,15 +12,18 @@ export interface PanelProps {
   now: Accessor<number>
   scopeLabel: Accessor<string>
   status: Accessor<string>
+  /** Key of the selected row (owned by the plugin: the agent dialog and the sidebar use it too). */
+  selected: Accessor<string | null>
+  select: (key: string | null) => void
   run: (action: Action) => void
 }
 
 export function Panel(props: PanelProps) {
   const theme = () => props.ctx.theme ?? {}
-  const [selected, setSelected] = createSignal<string | null>(null)
+  const setSelected = (key: string) => props.select(key)
   const index = createMemo(() => {
     const rows = props.rows()
-    const i = rows.findIndex((r) => r.key === selected())
+    const i = rows.findIndex((r) => r.key === props.selected())
     return i < 0 ? 0 : i
   })
   const current = () => props.rows()[index()]

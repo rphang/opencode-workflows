@@ -7,28 +7,41 @@
 //   events delta / finished          → one global stream, filtered here by Location and session
 //
 // Surfaces: the prompt footer (`wf <name> 7/12 · 81.2k · $0.42`), the home footer (`wf 2 running`), a
-// session panel "workflows" with the tree (<leader>o, /wf), <leader>j to message an agent, and a
-// desktop notification (or a toast) when a run finishes. If the RPC is unavailable (plugin disabled,
-// older opencode) it stays silent; /workflows keeps working.
+// session panel "workflows" with the tree (<leader>o, /wf), the agent dialog (<leader>j, X25), a
+// sidebar summary (X26), and a desktop notification (or a toast) when a run finishes. If the RPC is
+// unavailable (plugin disabled) it retries a few times (X27), then stays quiet; /workflows keeps working.
+//
+// The host-agnostic state and sync live in src/client/ (shared with a GUI companion); this file only
+// wires them to the opencode 2.3 TUI plugin API (@opencode/plugin/tui, types only: the host provides it).
 
-import { createMemo, createSignal, Show } from "solid-js"
-import type { AgentView, FinishedEvent } from "../plugin/live.ts"
+import type { Plugin } from "@opencode/plugin/tui"
+import { createEffect, createMemo, createRoot, createSignal, Show, untrack } from "solid-js"
+import { TreeSync } from "../client/sync.ts"
 import { definition } from "../plugin/rpc-def.ts"
 import { Panel } from "./panel.tsx"
+import { Sidebar } from "./sidebar.tsx"
 import {
-  acceptRun,
   footerParts,
   homeFooterText,
   isActive,
   isOpen,
   notifyFinished,
+  PICKER_ACTIONS,
+  pickerAction,
+  pickerCurrent,
+  pickerOptions,
+  pickerSearch,
   rowsFor,
+  runKey,
   targetFor,
   TreeStore,
+  viewedSession,
   type Action,
   type ControlRequest,
   type Expanded,
   type Filter,
+  type PickerKey,
+  type PickerValue,
 } from "./store.ts"
 
 export const PANEL = "workflows"
@@ -46,7 +59,7 @@ function clip(s: string, n = 400): string {
 
 const plugin = {
   id: "dynamic-workflows.tui",
-  setup(ctx: any) {
+  setup(ctx: Plugin.Context) {
     const rpc = ctx.client.rpc(definition)
     const tree = new TreeStore()
     const [version, setVersion] = createSignal(0)
@@ -55,6 +68,8 @@ const plugin = {
     const [available, setAvailable] = createSignal(false)
     const [status, setStatus] = createSignal("")
     const [now, setNow] = createSignal(Date.now())
+    /** Key of the row selected in the panel (kept here so the agent dialog can start on it). */
+    const [selected, setSelected] = createSignal<string | null>(null)
     const expanded: Expanded = new Map()
     const cleanups: (() => void)[] = []
 
@@ -67,94 +82,45 @@ const plugin = {
     }
     const location = () => ({ location: { directory: target().directory } })
 
-    // One `list` at a time. Events that arrive while it is in flight are replayed over its result
-    // (TreeStore.beginSync/replace), and a resync asked for meanwhile runs once more afterwards: the
-    // gap it reports may be newer than the list already in flight.
-    let syncing: Promise<void> | undefined
-    let again = false
-    const resync = (): Promise<void> => {
-      if (syncing) {
-        again = true
-        return syncing
-      }
-      syncing = (async () => {
-        do {
-          again = false
-          const f = filter()
-          tree.beginSync()
-          try {
-            const res = await rpc.list(f.sessionID ? { sessionID: f.sessionID } : { all: true }, location())
-            if (res?.ok) {
-              tree.replace(res)
-              setAvailable(true)
-              setStatus("")
-              bump()
-            } else {
-              tree.endSync()
-              if (res?.message) setStatus(clip(res.message, 120))
-            }
-          } catch (e) {
-            // rpc.unavailable (plugin disabled or not loaded in that Location): stay silent.
-            tree.endSync()
-            setAvailable(false)
-            setStatus(`workflows RPC unavailable (${clip(errText(e), 80)}); use /workflows`)
-          }
-        } while (again)
-        syncing = undefined
-      })()
-      return syncing
-    }
-
-    const sameLocation = (e: any) => {
-      const dir = e?.location?.directory ?? e?.data?.directory ?? e?.data?.runs?.[0]?.directory
-      return typeof dir === "string" && acceptRun({ directory: dir, parentSessionID: null }, { directory: target().directory, sessionID: null })
-    }
-
-    cleanups.push(
-      rpc.events.on("delta", (e: any) => {
-        if (!sameLocation(e)) return
-        const d = e.data ?? {}
-        const epoch = typeof d.epoch === "string" ? d.epoch : null
-        const { gap } = tree.apply({ seq: Number(d.seq) || 0, epoch, runs: d.runs ?? [], agents: d.agents ?? [] })
-        setAvailable(true)
+    // The resync driver (src/client/sync.ts): one `list` at a time, events replayed over it, gap and
+    // epoch resyncs, and the finish notification once per run of the viewed session.
+    const sync = new TreeSync({
+      rpc,
+      target: filter,
+      tree,
+      onChange: () => {
+        setAvailable(sync.available)
+        setStatus(sync.status)
         bump()
-        if (gap) void resync()
-      }),
-    )
-    cleanups.push(
-      rpc.events.on("finished", (e: any) => {
-        const d = (e.data ?? {}) as FinishedEvent
-        if (!sameLocation(e)) return
-        // Once per run the tree was showing: not for a duplicate, nor for a run it never knew.
-        const fresh = tree.finished(d)
-        bump()
-        if (!fresh) return
-        const f = filter()
-        if (f.sessionID && d.parentSessionID !== f.sessionID) return
-        void notifyFinished(d, { attention: ctx.attention, toast: ctx.ui.toast })
-      }),
-    )
+      },
+      onFinished: (d) => void notifyFinished(d, { attention: ctx.attention, toast: ctx.ui.toast }),
+    })
+    const resync = () => sync.resync()
+    sync.start()
+    cleanups.push(() => sync.dispose())
+    // A plugin was (re)loaded or changed: start over (X27; a cold start may have given up already).
+    const offPlugins = ctx.data?.on?.("plugin.updated", () => void sync.refresh())
+    if (typeof offPlugins === "function") cleanups.push(offPlugins)
 
-    // Resync when the viewed session (and so the target) or the scope changes, and periodically
-    // while a run is active (missed events, reconnects).
-    let lastKey = ""
-    const watchTarget = setInterval(() => {
-      const f = filter()
-      const key = `${f.directory}|${f.sessionID}`
-      if (key !== lastKey) {
-        lastKey = key
-        void resync()
-      }
-    }, 500)
+    // Resync when the viewed session (and so the target) or the scope changes: the router's route and
+    // the session data are Solid stores in opencode 2.3 (route.tsx createStore/reconcile, the client's
+    // data store), so an effect over filter() sees every change. Its own root: setup has no owner.
+    createRoot((dispose) => {
+      cleanups.push(dispose)
+      createEffect(() => {
+        filter()
+        untrack(() => sync.checkTarget())
+      })
+    })
+    // Periodically while a run is active (missed events, reconnects).
     const periodic = setInterval(() => {
       if ([...tree.runs.values()].some(isActive)) void resync()
     }, RESYNC_MS)
     const ticker = setInterval(() => {
       if ([...tree.runs.values()].some(isActive)) setNow(Date.now())
     }, TICK_MS)
-    for (const t of [watchTarget, periodic, ticker]) (t as any).unref?.()
+    for (const t of [periodic, ticker]) (t as { unref?: () => void }).unref?.()
     cleanups.push(() => {
-      clearInterval(watchTarget)
       clearInterval(periodic)
       clearInterval(ticker)
     })
@@ -175,7 +141,8 @@ const plugin = {
 
     const control = async (req: ControlRequest) => {
       try {
-        const res = await rpc.control(req, location())
+        // The output schema is a plain object; the handler answers {ok, message} (src/plugin/rpc-def.ts).
+        const res = (await rpc.control(req, location())) as { ok?: boolean; message?: string } | undefined
         toast(String(res?.message ?? "done"), res?.ok ? "success" : "warning", "Workflows")
       } catch (e) {
         toast(errText(e), "error", "Workflows")
@@ -232,34 +199,67 @@ const plugin = {
       }, 50)
     }
 
-    /** <leader>j: message the agent selected in the panel, or pick a running agent. */
-    const messageAgent = async () => {
-      const running: AgentView[] = []
-      for (const r of tree.visibleRuns(filter())) {
-        if (!isActive(r)) continue
-        for (const a of tree.agentsOf(r.runId)) if (a.status === "running" || a.status === "queued") running.push(a)
+    /** Sidebar click (X26): opens the panel (if needed) with the run selected and unfolded. */
+    const showRun = (runId: string | null) => {
+      if (runId) {
+        setSelected(runKey(runId))
+        expanded.set(runKey(runId), true)
+        bump()
       }
-      if (!running.length) return toast("No running workflow agent to message", "info")
-      const picked: AgentView | undefined =
-        running.length === 1
-          ? running[0]
-          : await ctx.ui.dialog.select({
-              title: "Message which agent?",
-              options: running.map((a) => ({
-                title: `#${a.index} ${a.label}`,
-                value: a,
-                description: `${a.status}${a.phase ? ` · ${a.phase}` : ""}`,
-                category: tree.runs.get(a.runId)?.workflowName ?? a.runId,
-              })),
-            })
-      if (!picked) return
-      await runAction({
-        type: "prompt",
-        title: `Message #${picked.index} ${picked.label}`,
-        description: "Read at the agent's next step boundary, without restarting it.",
-        control: { runId: picked.runId, action: "message", agentIndex: picked.index, urgent: false },
-      })
+      if (ctx.ui.panel.current()?.name !== PANEL && !ctx.ui.panel.open(PANEL)) return toast("Could not open the workflows panel here", "warning")
+      void resync()
     }
+
+    /**
+     * <leader>j (X25): one searchable dialog of the running and queued agents. Enter steers the
+     * highlighted agent; ctrl+u (urgent steer), ctrl+d (stop) and ctrl+o (open) are footer actions.
+     * An action does not close the dialog, but the prompt or confirm it shows replaces it.
+     */
+    const agentDialog = async () => {
+      const options = pickerOptions(tree, filter())
+      if (!options.length) return toast("No running workflow agent", "info")
+      const act = (value: PickerValue, key: PickerKey) => {
+        const a = pickerAction(tree, value, key)
+        if (a.type === "open") ctx.ui.dialog.clear()
+        void runAction(a)
+      }
+      const picked = await ctx.ui.dialog.select({
+        title: "Workflow agents",
+        placeholder: "#index, label, phase, workflow or run id",
+        options,
+        current: pickerCurrent(options, selected()),
+        search: pickerSearch,
+        actions: PICKER_ACTIONS.map((a) => ({ bind: a.bind, title: a.title, onTrigger: (v: PickerValue) => act(v, a.key) })),
+      })
+      if (picked) await runAction(pickerAction(tree, picked, "steer"))
+    }
+
+    // ---- global commands ----------------------------------------------------------------------
+
+    // A setup-time layer (opencode 2.3 registers it for the plugin's lifetime; it used to need an
+    // `app` slot render that returned null).
+    ctx.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "workflows.panel",
+          title: "Workflows: toggle the live progress tree",
+          group: "Workflows",
+          bind: "<leader>o",
+          palette: true,
+          slash: { name: "wf" },
+          run: () => openPanel(),
+        },
+        {
+          id: "workflows.message",
+          title: "Workflows: agents (steer, stop, open)",
+          group: "Workflows",
+          bind: "<leader>j",
+          palette: true,
+          run: () => void agentDialog(),
+        },
+      ],
+    }))
 
     // ---- surfaces -----------------------------------------------------------------------------
 
@@ -271,8 +271,7 @@ const plugin = {
         render: (input: { sessionID?: string }) => {
           const parts = () => {
             version()
-            const sid = input.sessionID ? targetFor({ type: "session", sessionID: input.sessionID }, getSession, "").sessionID : null
-            return available() ? footerParts(visibleRuns(), sid) : null
+            return available() ? footerParts(visibleRuns(), viewedSession(input.sessionID, getSession)) : null
           }
           // Two texts so that, when the footer is narrow, only the name is shortened: the counts,
           // tokens and cost (flexShrink 0) always show whole. The separator is a no-break space: a
@@ -312,7 +311,7 @@ const plugin = {
     cleanups.push(
       ctx.ui.slot({
         append: "session.panel",
-        render: (input: any) => (
+        render: (input) => (
           <Show when={input.name === PANEL}>
             <Panel
               ctx={ctx}
@@ -320,6 +319,8 @@ const plugin = {
               rows={rows}
               now={now}
               status={status}
+              selected={selected}
+              select={setSelected}
               scopeLabel={() => (allRuns() ? "all runs of this project (a: this session)" : "this session (a: all runs)")}
               run={(a) => void runAction(a)}
             />
@@ -329,36 +330,18 @@ const plugin = {
     )
     cleanups.push(
       ctx.ui.slot({
-        append: "app",
-        render() {
-          ctx.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-              {
-                id: "workflows.panel",
-                title: "Workflows: toggle the live progress tree",
-                group: "Workflows",
-                bind: "<leader>o",
-                palette: true,
-                slash: { name: "wf" },
-                run: () => openPanel(),
-              },
-              {
-                id: "workflows.message",
-                title: "Workflows: message a running agent",
-                group: "Workflows",
-                bind: "<leader>j",
-                palette: true,
-                run: () => void messageAgent(),
-              },
-            ],
-          }))
-          return null
-        },
+        append: "sidebar.content",
+        render: (input: { sessionID?: string }) => (
+          <Sidebar
+            ctx={ctx}
+            sessionID={() => (available() ? viewedSession(input.sessionID, getSession) : null)}
+            runs={visibleRuns}
+            openRun={showRun}
+          />
+        ),
       }),
     )
 
-    void resync()
     return () => {
       for (const c of cleanups.splice(0).reverse()) {
         try {
@@ -367,6 +350,6 @@ const plugin = {
       }
     }
   },
-}
+} satisfies Plugin.Definition
 
 export default plugin
