@@ -36,7 +36,7 @@ describe("X25 agent dialog", () => {
   const s = treeOf(runs, agents)
   const f = { directory: DIR, sessionID: S }
 
-  test("X25 options: the running and queued agents of the visible active runs (newest run first), `#i label`, `status · phase · model`, by workflow", () => {
+  test("X25 options: the running and queued agents of the visible active runs (newest run first), `#i label`, `status · phase`, by workflow", () => {
     const options = pickerOptions(s, f)
     expect(options.map((o) => o.value)).toEqual([
       { runId: "wf_new", index: 1 },
@@ -45,11 +45,14 @@ describe("X25 agent dialog", () => {
     ])
     expect(options[1]).toMatchObject({
       title: "#3 payments api",
-      description: "running · Research · openai/gpt-5.4-mini",
+      description: "running · Research",
       category: "deep-research",
     })
     expect(options[0]!.description).toBe("queued · Research")
     expect(options[2]!.description).toBe("running")
+    // No model: opencode's dialog cuts the description at a fixed width without an ellipsis, so a
+    // provider/model id came out as "open" (seen live on 2.3.0). The tree rows show the model.
+    for (const o of options) expect(o.description).not.toContain("gpt-5.4-mini")
     // The whole Location (the `a` scope) adds the other session's run.
     expect(pickerOptions(s, { directory: DIR, sessionID: null }).map((o) => o.value.runId)).toContain("wf_other")
     expect(pickerOptions(treeOf([run({ status: "completed" })]), f)).toEqual([])
