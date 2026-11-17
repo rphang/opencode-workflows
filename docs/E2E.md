@@ -216,15 +216,18 @@ your own:
    agents (one with `effort:'low'`, one on `opencode/glm-5.3-flash-free`), two agents that call
    `slow_step` ten times, and a `Report` phase labeled and run on `opencode/mimo-v2.6-flash-free`.
    Type the request in the composer (the `Prompt` textbox), then click the pill, its menu row, a row's
-   Message and Stop buttons, and Open session. Screenshots are `page.screenshot` at the window's
+   Message and Stop buttons, and Open session (while the run is still active, to see the pill there). Screenshots are `page.screenshot` at the window's
    device scale factor (2).
 6. Quit only the app and the `opencode-cli serve --service` whose paths are in your sandbox.
 
 Seen on 2.3.0: the pill appeared 2 s after the launch (`wf 0/5 · 0 · $0`), its menu row opened the
 panel on the run, the rows showed each agent's model (`…#low`, the other models) and live
 `» slow_step {"n":…}` activity, a message reached `#4` (its reply ended `STEERED-OK`, the run said
-`1 steered`), and the stop ended `#3` as failed, "stopped by user". The finish notice was not checked.
-A pending phase with no agents yet shows ✓ (`0/0`) in the panel.
+`1 steered`), the stop ended `#3` as failed, "stopped by user", and `#4`'s own tab showed the parent's
+pill (red after the stop). The finish notice was not checked.
+The first run also showed two panel faults, fixed before the final shots: a declared phase with no
+agents yet showed ✓ (`0/0`), and at the `narrow` width the agent rows cut off their model and the
+scope switch wrapped its label and description side by side.
 
 ## What is covered (live)
 

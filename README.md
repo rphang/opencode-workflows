@@ -459,8 +459,8 @@ curl -u opencode:$OPENCODE_PASSWORD -H "content-type: application/json" \
 
 opencode's desktop app (2.3) can load a plugin's GUI part, and this plugin ships one
 (`dist/gui-experimental.cjs`, the `./gui-experimental` export). opencode marks this plugin API as
-experimental. The pill, the tree panel, steering and stop were checked live in the macOS desktop app
-2.3.0 (the screenshots below); the finish notice and a workflow agent's own tab were not.
+experimental. The pill (also in a workflow agent's own tab), the tree panel, steering and stop were
+checked live in the macOS desktop app 2.3.0 (the screenshots below); the finish notice was not.
 
 - **Composer pill.** While a run of the session is active, a pill above the composer shows
   `wf <done>/<total> · <tokens> · $<cost>` (`+n` when more runs are active). It turns orange when a
@@ -477,9 +477,9 @@ experimental. The pill, the tree panel, steering and stop were checked live in t
   opens the session. If none was shown (for example because the app has focus), you get a toast.
 - From a workflow agent's own tab, the pill and the tree show the parent's run.
 
-![The desktop app's composer pill "wf 3/5 · 75.6k · $0" above the composer, with its menu open: a heading "Workflow api-review" and one row, api-review 3/5 · 75.6k · $0](docs/assets/desktop-pill.png)
+![The desktop app's composer pill "wf 3/5 · 54.6k · $0" above the composer, with its menu open: a heading "Workflow api-review" and one row, api-review 3/5 · 54.6k · $0](docs/assets/desktop-pill.png)
 
-![The tree in the desktop app's side panel next to the session: the api-review run, its Scan phase with three completed agents on their models and two running slow agents with stop, message and urgent-message buttons, and the Report phase with its model label](docs/assets/desktop-tree-panel.png)
+![The tree in the desktop app's side panel next to the session: the api-review run, its Scan phase with three completed agents on their models and two running slow agents with stop, message and urgent-message buttons, and the Report phase, not started yet (◌ 0/0), with its model label](docs/assets/desktop-tree-panel.png)
 
 | Steer an agent | Stop an agent | Finished run |
 |---|---|---|
