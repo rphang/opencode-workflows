@@ -209,8 +209,8 @@ and loads it for every plugin listed in `plugins`. opencode marks this plugin AP
 
 | Install | GUI entry | Pill, tree panel, finish notice |
 |---|---|---|
-| npm package (`plugins` entry or `opencode plugin add`) | `exports["./gui-experimental"]` → `dist/gui-experimental.cjs`, one CommonJS file | yes (not live-verified) |
-| Directory entry (`file:///…/opencode-workflows`) | the same export (build first) | yes (not live-verified) |
+| npm package (`plugins` entry or `opencode plugin add`) | `exports["./gui-experimental"]` → `dist/gui-experimental.cjs`, one CommonJS file | yes (the same bundle as the directory entry) |
+| Directory entry (`file:///…/opencode-workflows`) | the same export (build first) | yes (pill and tree live-verified on desktop 2.3.0) |
 | Loader file (`plugins/workflows.js`) | none | no |
 
 `dist/gui-experimental.cjs` is built with opencode's Vite preset (`@opencode/plugin/gui/vite`) and

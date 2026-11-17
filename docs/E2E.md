@@ -186,6 +186,46 @@ The 0.3.0 README images (`live-tree-running`, `-agent-dialog`, `-sidebar`, `-ste
 Free models have a daily quota (`provider.free-limit`); one demo run used most of it, and the last
 agent failed with that error. The finished-run image therefore stays the 2.0.15 one.
 
+### Desktop app (macOS)
+
+The `desktop-*.png` README images were taken in the macOS desktop app 2.3.0, driven over the Chrome
+DevTools Protocol with `playwright-core` (`connectOverCDP`), in a profile that shares nothing with
+your own:
+
+1. `npm run build`, then copy `dist`, `workflows`, `package.json` and `node_modules` to a directory
+   outside your home (for example `/Users/Shared/<sandbox>/plugin`). The app can show a plugin's path,
+   and a path under your home shows your user name.
+2. Start the app with an empty environment: `env -i` with `HOME`, `XDG_*` and
+   `OPENCODE_TEST_HOME` under the sandbox, `OPENCODE_DESKTOP_TEST_ROOT=<sandbox>/root` (the app keeps
+   its data, config, cache, state and window state there), `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+   then `/Applications/OpenCode.app/Contents/MacOS/OpenCode --remote-debugging-port=<port>`. A
+   packaged build ignores `OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT`; the switch works and binds to
+   127.0.0.1. Put `{"plugins":["file:///<sandbox>/plugin"],"model":"opencode/deepseek-v4.1-flash-free"}`
+   in `<sandbox>/root/config/opencode/opencode.json`.
+3. The app's background service listens on a fixed port, so a second one fails with "Managed service
+   port … is already in use" while your own service runs. Set another port with the sandbox
+   environment (`opencode service set port <port>`, which writes `<sandbox>/root/config/opencode/service.json`)
+   and press Restart.
+4. First-launch onboarding creates `~/Documents/Default Project`, using the real Documents folder
+   whatever `HOME` is, and opens it. Wipe `<sandbox>/root/data` and `<sandbox>/root/desktop/drafts.sqlite*`
+   (keep `opencode.settings`, which records that onboarding is done), restart, and create the session
+   in the demo project with `opencode api POST /api/session` and `{"location":{"directory":…}}`. Run
+   every sandbox `opencode` command from the demo project: the CLI registers its working directory as
+   a project on the server it talks to.
+5. The demo project has the `slow_step` plugin (4 s per call) and a saved workflow: three quick
+   agents (one with `effort:'low'`, one on `opencode/glm-5.3-flash-free`), two agents that call
+   `slow_step` ten times, and a `Report` phase labeled and run on `opencode/mimo-v2.6-flash-free`.
+   Type the request in the composer (the `Prompt` textbox), then click the pill, its menu row, a row's
+   Message and Stop buttons, and Open session. Screenshots are `page.screenshot` at the window's
+   device scale factor (2).
+6. Quit only the app and the `opencode-cli serve --service` whose paths are in your sandbox.
+
+Seen on 2.3.0: the pill appeared 2 s after the launch (`wf 0/5 · 0 · $0`), its menu row opened the
+panel on the run, the rows showed each agent's model (`…#low`, the other models) and live
+`» slow_step {"n":…}` activity, a message reached `#4` (its reply ended `STEERED-OK`, the run said
+`1 steered`), and the stop ended `#3` as failed, "stopped by user". The finish notice was not checked.
+A pending phase with no agents yet shows ✓ (`0/0`) in the panel.
+
 ## What is covered (live)
 
 

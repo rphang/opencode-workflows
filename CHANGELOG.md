@@ -19,6 +19,10 @@ may contain breaking changes.
 - README screenshots retaken on opencode 2.3.0 (running tree, steering, stop, steered agent session)
   plus two new ones: the agent dialog and the sidebar section. `docs/E2E.md` describes the Linux
   (tmux) capture recipe.
+- README: five desktop app screenshots (composer pill and its menu, the tree panel, steering, stop,
+  a finished run), taken in the macOS desktop app 2.3.0. The pill and the tree panel are now
+  live-verified there (PARITY X28, X29); the finish notice (X30) is not. `docs/E2E.md` describes the
+  desktop capture recipe.
 
 ## [0.3.0] - 2026-11-17
 
