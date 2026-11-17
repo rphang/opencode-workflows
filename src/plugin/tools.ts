@@ -172,11 +172,15 @@ export function stripWrappingFence(text: string): string {
 async function launchResult(
   host: WorkflowHost,
   input: WorkflowToolInput,
-  tctx: { sessionID: unknown; agent?: unknown; messageID?: unknown; id?: unknown },
+  tctx: { sessionID: unknown; agent?: unknown; messageID?: unknown; id?: unknown; signal?: AbortSignal },
 ) {
   const agent = typeof tctx.agent === "string" && tctx.agent ? tctx.agent : undefined
-  // The tool call a scriptPath approval prompt belongs to (P76).
-  const call = typeof tctx.messageID === "string" && typeof tctx.id === "string" ? { messageID: tctx.messageID, id: tctx.id } : undefined
+  // The tool call a scriptPath approval prompt belongs to (P76). Its signal is read lazily: reading it
+  // opts this tool into cooperative stop, which only a launch waiting on a prompt needs.
+  const call =
+    typeof tctx.messageID === "string" && typeof tctx.id === "string"
+      ? { messageID: tctx.messageID, id: tctx.id, signal: () => tctx.signal }
+      : undefined
   const out = await host.launch(input, String(tctx.sessionID), { agent, call })
   return { content: JSON.stringify(out, null, 2), metadata: { ...out } }
 }

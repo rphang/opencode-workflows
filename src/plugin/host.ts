@@ -6,7 +6,7 @@
 import { realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path"
-import { isPermissionDecline, type AssertPermission } from "../opencode/permission-assert.ts"
+import { isPermissionCancelled, isPermissionDecline, type AssertPermission } from "../opencode/permission-assert.ts"
 import { evaluatePermission, type PermissionRule } from "../opencode/permissions.ts"
 import {
   getActiveRun,
@@ -36,6 +36,8 @@ import {
   REPEAT_NOTE,
   type LiveActivity,
 } from "./format.ts"
+
+const CANCELLED = "the workflow tool call was cancelled while waiting for approval; no run was started"
 
 /** Tool input: Claude Code's WorkflowInput plus the non-CC `budget` extension (budget.total). */
 export interface WorkflowToolInput extends WorkflowInput {
@@ -245,11 +247,14 @@ export class WorkflowHost {
    * `caller.agent` is the parent's current agent (tool ctx.agent): children inherit it (P61).
    * `caller.call` is the tool call (ctx.messageID / ctx.id): a scriptPath approval prompt is shown with
    * it (P76), and a user's plain rejection of that prompt is rethrown so opencode ends the step.
+   * `call.signal` returns the call's abort signal; it is read only when a scriptPath is checked (reading
+   * it opts a promise tool into cooperative stop), and cancelling the call withdraws the prompt and
+   * starts no run.
    */
   async launch(
     input: WorkflowToolInput,
     sessionID: string,
-    caller: { agent?: string; call?: { messageID: string; id: string } } = {},
+    caller: { agent?: string; call?: { messageID: string; id: string; signal?: () => AbortSignal | undefined } } = {},
   ): Promise<WorkflowOutput> {
     const store = this.opts.store
     const runId = store.newRunId()
@@ -266,13 +271,16 @@ export class WorkflowHost {
     // 1. Resolve the source: scriptPath > script > name (P01).
     let source: string
     let givenPath: string | undefined
+    let callSignal: AbortSignal | undefined
     if (nonEmpty(input.scriptPath)) {
       try {
         givenPath = await this.authorizeScriptPath(input.scriptPath, sessionID, caller.agent, caller.call)
+        callSignal = this.opts.assertPermission ? caller.call?.signal?.() : undefined
       } catch (e) {
         if (isPermissionDecline(e)) throw e
         return fail(errMsg(e))
       }
+      if (callSignal?.aborted) return fail(CANCELLED)
       try {
         source = await readFile(givenPath, "utf8")
       } catch (e) {
@@ -338,6 +346,7 @@ export class WorkflowHost {
 
     // 5. Start in the background and return immediately (P02).
     const budgetTotal = typeof input.budget === "number" && Number.isFinite(input.budget) && input.budget > 0 ? input.budget : null
+    if (callSignal?.aborted) return fail(CANCELLED)
     let run: WorkflowRun
     try {
       run = startRun({
@@ -414,7 +423,12 @@ export class WorkflowHost {
    * Returns the absolute path as given (P04 keeps it; its real target is what was checked); throws with
    * the reason otherwise (a user's plain rejection of a tool call's prompt is rethrown as is).
    */
-  private async authorizeScriptPath(given: string, sessionID: string, agent?: string, call?: { messageID: string; id: string }): Promise<string> {
+  private async authorizeScriptPath(
+    given: string,
+    sessionID: string,
+    agent?: string,
+    call?: { messageID: string; id: string; signal?: () => AbortSignal | undefined },
+  ): Promise<string> {
     const raw = given.trim()
     const isUnc = (p: string) => /^[\\/]{2}/.test(p)
     if (isUnc(raw)) throw new Error(`scriptPath ${raw} is a UNC or device path; only local files can be run`)
@@ -457,12 +471,14 @@ export class WorkflowHost {
     const assert = this.opts.assertPermission
     /** opencode's own check of one resource; a refusal becomes `refused(reason)`. */
     const ask = async (action: string, resource: string, save: string, refused: (reason: string) => string): Promise<void> => {
+      const source = call ? { type: "tool" as const, messageID: call.messageID, id: call.id } : undefined
       try {
         await assert!(
-          { sessionID, agent, action, resources: [resource], save: [save], ...(call ? { source: { type: "tool", ...call } } : {}) },
-          { interactive: !!call },
+          { sessionID, agent, action, resources: [resource], save: [save], ...(source ? { source } : {}) },
+          { interactive: !!call, signal: call?.signal?.() },
         )
       } catch (e) {
+        if (isPermissionCancelled(e)) throw e
         if (isPermissionDecline(e)) {
           if (call) throw e
           throw new Error(refused("the request was rejected"))
@@ -474,7 +490,8 @@ export class WorkflowHost {
       const outside = `scriptPath ${raw} is outside the project directory (${this.opts.cwd}) and opencode's external_directory permission`
       const effects = dirSpellings.map((d) => evaluatePermission("external_directory", slash(join(d, "*")), rules))
       const allowedAt = effects.indexOf("allow")
-      if (allowedAt < 0 && (!assert || effects.includes("deny"))) {
+      // A deny on any spelling refuses; without opencode's own check, so does a missing allow.
+      if (effects.includes("deny") || (allowedAt < 0 && !assert)) {
         throw new Error(`${outside} does not allow ${dirname(real)}. Copy the script into the project, or allow that directory.`)
       }
       if (assert) {

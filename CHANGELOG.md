@@ -40,6 +40,12 @@ may contain breaking changes.
 - After an urgent message whose follow-up turn produced no text, the result no longer falls back to
   the cut-off text of the interrupted step.
 - The tree's resync driver no longer updates a disposed view when a pending `list` answers.
+- Cancelling a `workflow` tool call while its `scriptPath` approval prompt is open withdraws the
+  prompt and starts no run (opencode rejects every prompt open in that session at that moment).
+- A deny rule on any spelling of a `scriptPath` directory (for example through a symlink) refuses
+  it, even when another spelling is allowed (P76).
+- `workflow({scriptPath})` inside a running script can no longer wait forever on a prompt that
+  another plugin's permission hook re-opened: after 3 s it is refused and the prompt withdrawn.
 - TUI cold start on opencode 2.3 (X27): the tree retries its first list while plugins load and
   starts over on `plugin.updated`, instead of staying empty until a run starts.
 

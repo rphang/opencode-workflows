@@ -47,6 +47,8 @@ export interface RunnerInput {
 
 /** Injection seams (tests) and host overrides. Everything is optional. */
 export interface PluginDeps {
+  /** P76: how long a scriptPath check inside a running script may wait (default UNATTENDED_ASSERT_TIMEOUT_MS). */
+  unattendedAssertTimeoutMs?: number
   env?: Record<string, string | undefined>
   /** Run data root (default: plugin option `dataDir`, then defaultDataRoot()). */
   dataDir?: string
@@ -137,7 +139,7 @@ export async function setupPlugin(ctx: Plugin.Context, deps: PluginDeps = {}): P
   })
 
   // P76 (opencode 2.3.0): scriptPath approvals through opencode's own permission check and prompt.
-  const assertPermission = createPermissionAsserter(ctx)
+  const assertPermission = createPermissionAsserter(ctx, { unattendedTimeoutMs: deps.unattendedAssertTimeoutMs })
 
   const host = new WorkflowHost({
     cwd,

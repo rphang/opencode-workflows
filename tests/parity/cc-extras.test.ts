@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { listWorkflows } from "../../src/registry.ts"
-import { FakeRunner } from "../helpers/fake-runner.ts"
-import { createHarness, script, SESSION, tag, tctx, type Harness } from "../helpers/plugin-harness.ts"
+import { FakeRunner, sleep } from "../helpers/fake-runner.ts"
+import { createHarness, script, SESSION, tag, tctx, waitFor, type Harness } from "../helpers/plugin-harness.ts"
 
 let h: Harness
 beforeEach(async () => {
@@ -368,5 +368,91 @@ describe("P76 scriptPath approval through ctx.permission.assert", () => {
     } finally {
       rmSync(alias, { recursive: false, force: true })
     }
+  })
+})
+
+// Review follow-ups: a prompt must not outlive its tool call, a deny on any spelling wins, and a
+// check inside a running script must fail closed whatever other evaluate hooks do.
+describe("P76 approval prompts never outlive their caller", () => {
+  const body = (v: string) => script(`return ${JSON.stringify(v)}`)
+  const readAll = { action: "read", resource: "*", effect: "allow" }
+  const outsideFile = (v: string) => {
+    const dir = join(h.base, "outside")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "flow.js"), body(v))
+    return join(dir, "flow.js")
+  }
+  const never = () => new Promise<never>(() => {})
+
+  test("P76 cancelling the tool call while its prompt is open rejects the prompt and starts no run", async () => {
+    const file = outsideFile("cancelled")
+    const p = await h.setup({ fake: { permissionAsk: never, parent: { permissions: [readAll] } } })
+    const ac = new AbortController()
+    const pending = p.tools().get("workflow")!.execute({ scriptPath: file }, { ...tctx(), signal: ac.signal })
+    const settled = pending.then(
+      (r: any) => ({ out: JSON.parse(r.content) }),
+      (e: unknown) => ({ thrown: e }),
+    )
+    await waitFor(() => p.fake.pendingPermissions.size === 1, "the prompt")
+    const [requestID] = [...p.fake.pendingPermissions.keys()]
+    ac.abort()
+    const res: any = await settled
+    expect(res.out?.error ?? String(res.thrown)).toMatch(/cancel/i)
+    expect(p.fake.pendingPermissions.size).toBe(0)
+    expect(p.fake.calls.permissionReply).toEqual([{ sessionID: SESSION, requestID, decision: "reject" }])
+    await sleep(30)
+    expect(await h.store.listRuns()).toEqual([])
+    expect(p.notifications()).toHaveLength(0)
+  })
+
+  test("P76 a launch without a prompt does not read the call's signal (no cooperative-stop opt-in)", async () => {
+    const p = await h.setup({ fake: { permissionAsk: never } })
+    let read = 0
+    const ctx = tctx()
+    const call = Object.defineProperty({ ...ctx }, "signal", {
+      get: () => {
+        read++
+        return ctx.signal
+      },
+    })
+    const res = await p.tools().get("workflow")!.execute({ script: body("x") }, call)
+    expect(JSON.parse(res.content).error).toBeUndefined()
+    expect(read).toBe(0)
+  })
+
+  test("P76 a deny rule on any spelling of the directory refuses, even when another spelling is allowed", async () => {
+    writeFileSync(join(h.base, "outside.js"), body("denied"))
+    const alias = `${h.base}-alias`
+    symlinkSync(h.base, alias, "junction")
+    try {
+      const rules = [readAll, { action: "external_directory", resource: join(h.base, "*"), effect: "allow" }, { action: "external_directory", resource: join(alias, "*"), effect: "deny" }]
+      for (const fake of [{ parent: { permissions: rules } }, { permissionAsk: () => "once" as const, parent: { permissions: rules } }]) {
+        const p = await h.setup({ fake })
+        const out = await p.call({ scriptPath: join(alias, "outside.js") })
+        expect(out.error).toMatch(/outside the project.*external_directory/)
+        expect(out.transcriptDir).toBeUndefined()
+        expect(p.fake.calls.asked).toHaveLength(0)
+      }
+    } finally {
+      rmSync(alias, { recursive: false, force: true })
+    }
+  })
+
+  test("P76 workflow({scriptPath}) inside a running script fails closed even when another plugin's evaluate hook re-asks", async () => {
+    const file = outsideFile("never")
+    const p = await h.setup({ fake: { permissionAsk: never, parent: { permissions: [readAll] } }, deps: { unattendedAssertTimeoutMs: 50 } })
+    // A later plugin's hook that turns every deny back into an ask (core runs hooks in order).
+    p.fake.permissionHooks.push({
+      name: "evaluate",
+      cb: (e: any) => {
+        e.effect = "ask"
+      },
+    })
+    await p.call({ script: script(`try { return await workflow({ scriptPath: ${JSON.stringify(file)} }) } catch (e) { return "refused: " + e.message }`) })
+    expect(String(p.resultOf(await p.notification(0)))).toMatch(/^refused: .*outside the project.*cannot ask/)
+    expect(p.fake.calls.asked).toHaveLength(1)
+    // The prompt it raised was rejected again, not left in the session.
+    expect(p.fake.pendingPermissions.size).toBe(0)
+    expect(p.fake.calls.permissionReply.map((r) => r.decision)).toEqual(["reject"])
   })
 })
