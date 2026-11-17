@@ -35,6 +35,11 @@
 //     with one idle marker and one wait(). A rejected hook fails the execution (`hookRejectFails`).
 //     Seams: FakeTurn.beforeIdleHook (input in flight as the hook starts) and .afterIdleCheck (input
 //     that arrives after the post-hook inbox check: it waits for the next wake).
+//   - the session "context" hooks of the Location run before every model step (respond() and each
+//     later step), with {sessionID, agent, model, tools: {}}.
+//   - background jobs (the always-background `subagent` tool): `fake.startBackground(sessionID)`
+//     lists a job in the idle hook's `background`; `fake.finishBackground(sessionID, job)` removes it
+//     and posts its `<subagent>` report as a resume:true steer, which wakes the idle session.
 //
 // Usage:
 //   const fake = createFakeCtx({ respond: ({ text, turn }) => ({ text: "hello" }) })
@@ -294,6 +299,8 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     asked: [] as FakePermissionRequest[],
     /** experimental.idle hook invocations (one per registered hook). */
     idleHook: [] as { sessionID: string; directory: string }[],
+    /** "context" hook invocations (before every model step). */
+    contextHook: [] as { sessionID: string; directory: string }[],
   }
   /** Approvals saved by an "always" reply (core: PermissionSaved, project-wide allow rules). */
   const savedPermissions: { action: string; resource: string; effect: "allow" }[] = []
@@ -399,10 +406,24 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     }
   }
 
+  /**
+   * The session "context" hook (core/session/model-request.ts): runs before every model request of
+   * the session, in the instance of its Location. The fake sends an empty tool map.
+   */
+  async function fireContext(s: FakeSession) {
+    const inst = instances.get(String(s.info.location?.directory))
+    for (const h of [...(inst?.sessionHooks ?? [])]) {
+      if (h.name !== "context") continue
+      calls.contextHook.push({ sessionID: s.info.id, directory: inst!.directory })
+      await h.cb({ sessionID: s.info.id, agent: s.info.agent ?? "build", model: s.info.model, system: [], messages: [], options: {}, tools: {} })
+    }
+  }
+
   /** One model turn: respond() once, its steps, one assistant message. No idle marker. */
   async function segment(s: FakeSession, text: string | null, turn: number, continuation: boolean): Promise<{ outcome: Outcome; spec: FakeTurn }> {
     const successor = text === null && !continuation
     const first = drain(s)
+    await fireContext(s) // before the first step's model request (respond() models the model starting)
     const spec = await respond({
       sessionID: s.info.id,
       text: text === null ? first.map((i) => i.text).join("\n\n") : text,
@@ -414,7 +435,10 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs))
     let outcome: Outcome = spec.outcome ?? "succeeded"
     for (let i = 0; i < (spec.steps ?? 1); i++) {
-      if (i > 0) drain(s)
+      if (i > 0) {
+        drain(s)
+        await fireContext(s)
+      }
       await spec.onStep?.(i)
       if (spec.stepDelayMs) await new Promise((r) => setTimeout(r, spec.stepDelayMs))
       if (s.interruptFlag) break
@@ -782,6 +806,22 @@ export function createFakeCtx(opts: FakeCtxOptions = {}) {
     /** Child sessions created so far (excludes the parent). */
     children() {
       return [...sessions.values()].filter((s) => s.info.id !== PARENT_ID)
+    },
+    /**
+     * 2.3.0 background job of `sessionID` (subagent tool, always background): listed in the idle
+     * hook's `background` until `finishBackground`, which removes it and posts its `<subagent>`
+     * report as a resume:true steer (the report wakes the idle session into a new execution).
+     */
+    startBackground(sessionID: string, job: Partial<FakeBackground> = {}): FakeBackground {
+      const s = need(sessionID)
+      const entry: FakeBackground = { kind: "subagent", sessionID, childSessionID: `ses_job${++seq}`, agent: "general", description: "job", ...job }
+      s.background = [...(s.background ?? []), entry]
+      return entry
+    },
+    async finishBackground(sessionID: string, job: FakeBackground, report = "<subagent>done</subagent>") {
+      const s = need(sessionID)
+      s.background = (s.background ?? []).filter((j) => j !== job)
+      await baseCtx.session.synthetic({ sessionID, text: report, delivery: "steer", resume: true, metadata: { source: "subagent" } })
     },
     /** The plugin instance of another Location (e.g. a worktree), sharing sessions and storage. */
     instance(dir: string): FakeInstance {

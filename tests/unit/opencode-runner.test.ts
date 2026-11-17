@@ -266,6 +266,48 @@ describe("submit.ts", () => {
     expect(attemptsUsed(st)).toBe(3)
   })
 
+  test("P21 two parallel workflow_submit calls in one instance both count (no lost update)", async () => {
+    const store = sharedStore()
+    // Reads take a while: both calls read the same state unless the registry serializes them.
+    const slow = {
+      ...store,
+      get: async (k: string) => {
+        const v = await store.get(k)
+        await new Promise((r) => setTimeout(r, 5))
+        return v
+      },
+    }
+    const registry = createSubmitRegistry(slow)
+    await registry.register("s1", SCHEMA)
+    const results = await Promise.all([registry.submit("s1", { answer: 1 }), registry.submit("s1", { answer: 2 })])
+    expect(results.map((r) => r.status)).toEqual(["invalid", "invalid"])
+    expect((await registry.read("s1"))?.failures).toBe(2)
+    expect((store.storage.get(SUBMIT_STORAGE_PREFIX + "s1") as any).failures).toBe(2)
+  })
+
+  test("P21 X23 another instance's stale copy cannot rewrite storage after the runner unregistered", async () => {
+    const store = sharedStore()
+    const runnerSide = createSubmitRegistry(store)
+    const worktree = createSubmitRegistry(store)
+    await runnerSide.register("s1", SCHEMA)
+    await worktree.submit("s1", { answer: 1 }) // the worktree instance now holds a memory copy
+    await runnerSide.unregister("s1")
+    expect(await worktree.submit("s1", { answer: "late" })).toEqual({ status: "unknown_session" })
+    expect(await worktree.nextAttempt("s1", "nudge")).toBeUndefined()
+    expect(await worktree.read("s1")).toBeUndefined()
+    expect(store.storage.has(SUBMIT_STORAGE_PREFIX + "s1")).toBe(false)
+  })
+
+  test("P21 X23 equal revs: the stored copy (the latest write) wins over the local one", async () => {
+    const store = sharedStore()
+    const a = createSubmitRegistry(store)
+    await a.register("s1", SCHEMA)
+    await a.nextAttempt("s1", "prompt") // a: rev 2 in memory and storage
+    const other = { ...(store.storage.get(SUBMIT_STORAGE_PREFIX + "s1") as any), failures: 1, lastError: "from b" }
+    store.storage.set(SUBMIT_STORAGE_PREFIX + "s1", other) // another instance's write from the same base: also rev 2
+    expect((await a.read("s1"))?.lastError).toBe("from b")
+  })
+
   test("P21 X23 the tool's `no attempts left` counts missed attempts too", async () => {
     process.env.MAX_STRUCTURED_OUTPUT_RETRIES = "3"
     const registry = createSubmitRegistry()

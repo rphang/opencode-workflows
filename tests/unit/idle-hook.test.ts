@@ -68,7 +68,7 @@ describe("X22 steering flush at the idle boundary", () => {
   test("X22 registration: only when ctx.session.hook exists; OPENCODE_WORKFLOW_IDLE_HOOK=0 is the kill switch", async () => {
     const { fake, registration } = await setup()
     expect(registration).toBeDefined()
-    expect(fake.sessionHooks.map((h) => h.name)).toEqual(["experimental.idle"])
+    expect(fake.sessionHooks.map((h) => h.name)).toEqual(["experimental.idle", "context"])
     await registration!.dispose()
     expect(fake.sessionHooks).toHaveLength(0)
     const old = createFakeCtx({ noSessionHook: true })
@@ -178,6 +178,29 @@ describe("X22 steering flush at the idle boundary", () => {
     expect(fake.calls.interrupt).toHaveLength(1) // the X03 wake
   })
 
+  test("X22 a window the hook closed reopens at the next model step when something else continues the execution", async () => {
+    const mb = new AgentMailbox()
+    let during: unknown
+    const { fake, runner } = await setup({
+      respond: async ({ continuation }) => {
+        if (!continuation) return { text: "first" }
+        if (during === undefined) during = await mb.post(msg("steer while working"))
+        return { text: "continued answer" }
+      },
+    })
+    // Another plugin's idle hook (e.g. opencode's /goal) keeps the execution going once.
+    let once = false
+    await (fake.ctx.session as any).hook("experimental.idle", async (e: any) => {
+      if (once) return
+      once = true
+      await fake.ctx.session.synthetic({ sessionID: e.sessionID, text: "keep going", delivery: "steer", resume: false } as any)
+    })
+    const out = await runner.run(req("task", mb).request)
+    expect(out).toMatchObject({ status: "completed", value: "continued answer" })
+    expect(during).toMatchObject({ ok: true, state: "sent" })
+    expect(mb.records()[0]!.status).toBe("delivered")
+  })
+
   test("X22 an error inside the hook never fails the child", async () => {
     const { fake, live, runner } = await setup({ respond: () => ({ text: "fine" }) })
     live.get = () => {
@@ -205,7 +228,7 @@ describe("X22 steering flush at the idle boundary", () => {
       respond: ({ successor }) => (successor ? { text: "REPLY TO MESSAGE" } : { steps: 2, afterSteps: () => void mb.post(msg("one more thing")), text: "first answer" }),
     })
     const out = await runner.run(req("task", mb).request)
-    expect(fake.sessionHooks).toHaveLength(1)
+    expect(fake.sessionHooks.map((h) => h.name)).toEqual(["experimental.idle", "context"])
     expect(fake.calls.idleHook).toHaveLength(0)
     expect(out).toMatchObject({ status: "completed", value: "REPLY TO MESSAGE" })
     expect(fake.calls.interrupt).toEqual([{ sessionID: fake.children()[0]!.info.id, resume: true }])
@@ -287,16 +310,20 @@ describe("X23 schema nudge at the idle boundary", () => {
     expect(await plain.runner.run(req("c").request)).toMatchObject({ status: "completed", value: "plain" })
     expect(plain.fake.calls.synthetic).toHaveLength(0)
 
-    // Its own subagent wakes the session with its notice (the hook runs again then): the runner re-prompts here.
+    // Its own subagent wakes the session with its report (the hook runs again then, X31): no nudge meanwhile.
+    let busyFake!: ReturnType<typeof createFakeCtx>
     const busy = await setup({
       respond: ({ turn, session }) => {
-        session.background = turn === 0 ? [{ kind: "subagent", sessionID: session.info.id, childSessionID: "ses_x" }] : []
-        return turn === 0 ? { text: "waiting for my subagent" } : { submit: [{ answer: "x" }] }
+        if (turn !== 0) return { submit: [{ answer: "x" }] }
+        const job = busyFake.startBackground(session.info.id)
+        setTimeout(() => void busyFake.finishBackground(session.info.id, job), 30)
+        return { text: "waiting for my subagent" }
       },
     })
+    busyFake = busy.fake
     expect(await busy.runner.run(req("c", undefined, { schema: SCHEMA }).request)).toMatchObject({ status: "completed" })
     expect(nudges(busy.fake)).toHaveLength(0)
-    expect(busy.fake.calls.prompt).toHaveLength(2)
+    expect(busy.fake.calls.prompt).toHaveLength(1)
 
     // A descendant's job wakes that descendant, not this session: it is nudged.
     const grandchild = await setup({
@@ -366,6 +393,37 @@ describe("X23 schema nudge at the idle boundary", () => {
     expect(nudges(fake)).toHaveLength(1) // sent in the wake turn
     // The runner had closed the window to verify its messages: the nudge does not reopen it.
     expect(during).toMatchObject({ ok: false, reason: "finishing" })
+  })
+
+  test("X23 a nudge whose send outlasts the hook's cap is not counted on top of the runner's re-prompt", async () => {
+    const mb = new AgentMailbox()
+    const { fake, registry, runner } = await setup(
+      { respond: ({ turn }) => (turn === 0 ? { text: "no submit" } : { submit: [{ answer: "ok" }] }) },
+      { timeoutMs: 40 },
+    )
+    const recorded: string[] = []
+    const next = registry.nextAttempt.bind(registry)
+    registry.nextAttempt = async (id, by) => {
+      recorded.push(by)
+      return next(id, by)
+    }
+    const opened: string[] = []
+    const open = mb.open.bind(mb)
+    mb.open = () => {
+      opened.push(mb.state)
+      open()
+    }
+    const orig = fake.ctx.session.synthetic
+    fake.ctx.session.synthetic = (async (input: any) => {
+      if (input.metadata?.workflowNudge !== undefined) await sleep(100) // past the cap: the hook has returned
+      return orig(input)
+    }) as typeof orig
+    const out = await runner.run(req("compute", mb, { schema: SCHEMA }).request)
+    expect(out).toMatchObject({ status: "completed", value: { answer: "ok" } })
+    await sleep(150) // the late send has landed by now
+    // The runner's re-prompt is the only attempt recorded; the late nudge neither counts nor reopens the window.
+    expect(recorded).toEqual(["prompt"])
+    expect(opened).toHaveLength(2) // the runner's two turns, nothing late
   })
 
   test("X23 messages sent during a nudge continuation are accepted and delivered", async () => {

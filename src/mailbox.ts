@@ -88,6 +88,8 @@ export class AgentMailbox {
   private deferred: { msg: AgentMessage; resolve: (r: PostResult) => void }[] = []
   private readonly inflight = new Set<Promise<unknown>>()
   private windowSent: SentMessage[] = []
+  /** quiesce() closed the window and the runner has not touched it since (reopen() may undo it). */
+  private quiesced = false
   private reserved = 0
   private send?: MessageSender
   private guard?: MessageGuard
@@ -158,6 +160,7 @@ export class AgentMailbox {
   /** Runner side: a turn's prompt has been sent; messages go out right away until close(). */
   open(): void {
     if (this._state === "closed") return
+    this.quiesced = false
     this._state = "open"
     const waiting = this.deferred
     this.deferred = []
@@ -169,6 +172,7 @@ export class AgentMailbox {
    * Resolves, once every send started in this window has settled, with the messages sent in it.
    */
   async close(): Promise<SentMessage[]> {
+    this.quiesced = false // the runner owns the window from here: reopen() no longer applies
     if (this._state !== "closed") this._state = "finishing"
     while (this.inflight.size) await Promise.all([...this.inflight])
     const sent = this.windowSent
@@ -183,9 +187,24 @@ export class AgentMailbox {
    * with the messages sent in this window so far.
    */
   async quiesce(): Promise<SentMessage[]> {
-    if (this._state === "open") this._state = "finishing"
+    if (this._state === "open") {
+      this._state = "finishing"
+      this.quiesced = true
+    }
     while (this.inflight.size) await Promise.all([...this.inflight])
     return this.windowSent.map((s) => ({ ...s }))
+  }
+
+  /**
+   * Hook side (X22): reopens a window that quiesce() closed, as long as the runner has not taken
+   * it over since (close(), open() or seal()). Used when the execution goes on after all: the idle
+   * hook's own continuation, or the next model step (another plugin's hook or a user prompt
+   * continued it). Returns whether it reopened.
+   */
+  reopen(): boolean {
+    if (!this.quiesced || this._state !== "finishing") return false
+    this.open()
+    return true
   }
 
   /** Runner side: confirms (or not) that a held or sent message reached the agent. */
@@ -198,6 +217,7 @@ export class AgentMailbox {
 
   /** The agent settled (or was stopped): every later message is refused with `finished`. */
   seal(): void {
+    this.quiesced = false
     this._state = "closed"
     const waiting = this.deferred
     this.deferred = []

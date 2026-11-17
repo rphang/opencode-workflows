@@ -40,6 +40,7 @@ import {
   type AgentInfo,
   type PermissionRule,
 } from "./permissions.ts"
+import { BACKGROUND_WAIT_MS, createJobTracker, type BackgroundJob, type JobTracker } from "./background.ts"
 import type { ChildLiveEntry, ChildLiveRegistry } from "./idle.ts"
 import { formatOrchestratorMessage, STEERING_PREAMBLE_LINE } from "./steer.ts"
 import { attemptsUsed, createSubmitRegistry, retryPrompt, type SubmitRegistry, type SubmitState } from "./submit.ts"
@@ -124,6 +125,21 @@ export interface OpencodeRunnerOptions {
    * without it (or when the hook never runs) the runner's own wake and re-prompt paths do the work.
    */
   live?: ChildLiveRegistry
+  /** Where the idle hook reports the child's background jobs (X31). Default: a tracker over ctx.storage. */
+  jobs?: JobTracker
+  /** How long the runner waits for an agent's background jobs after its turn (default BACKGROUND_WAIT_MS). */
+  backgroundWaitMs?: number
+}
+
+/** "subagent job \"research\"", "2 background jobs (subagent \"a\", image)". */
+function describeJobs(jobs: readonly BackgroundJob[]): string {
+  const one = (j: BackgroundJob) => (j.label ? `${j.kind} "${j.label}"` : j.kind)
+  return jobs.length === 1 ? `background job (${one(jobs[0]!)})` : `${jobs.length} background jobs (${jobs.map(one).join(", ")})`
+}
+
+function formatWait(ms: number): string {
+  if (ms < 1000) return `${ms} ms`
+  return ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`
 }
 
 const defaultGit: GitExec = (args, cwd) =>
@@ -213,6 +229,8 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunnerOptions): AgentRunner {
   const registry = options.registry ?? createSubmitRegistry(ctx.storage)
+  const jobs = options.jobs ?? createJobTracker(ctx.storage)
+  const backgroundWaitMs = options.backgroundWaitMs ?? BACKGROUND_WAIT_MS
   const git = options.git ?? defaultGit
   const denied = options.deniedTools ?? ["workflow"]
 
@@ -289,6 +307,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
       const timeoutMs = options.timeoutMs ?? envTimeout()
       let stopReason: StopReason | undefined
       let liveEntry: ChildLiveEntry | undefined
+      let jobsOpened = false
       let onStop!: (r: StopReason) => void
       const stopped = new Promise<StopReason>((resolve) => {
         onStop = (r) => {
@@ -459,6 +478,42 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         return { status: "stopped", usage, sessionID }
       }
 
+      /**
+       * X31 (opencode 2.3+): wait() does not cover background jobs. While the idle hook's latest report
+       * lists the child's own subagent/image jobs, the child is not done: each job's report wakes it
+       * into a new execution, whose hook reports again. Polls the report (shared storage, so worktree
+       * children work too) until one lists none, then waits for that execution to end. Capped at
+       * `backgroundWaitMs`; the stop signal and agent timeout end it at once. False when stopped.
+       */
+      const awaitBackground = async (): Promise<boolean> => {
+        if (!jobsOpened) return true
+        let report = await jobs.read(sessionID!).catch(() => undefined)
+        if (!report?.jobs.length) return true
+        const deadline = Date.now() + backgroundWaitMs
+        let delay = 50
+        for (;;) {
+          const left = deadline - Date.now()
+          if (left <= 0) {
+            warn(
+              `${describeJobs(report.jobs)} still running after ${formatWait(backgroundWaitMs)}: the result was read ` +
+                "without waiting for it; its report may wake the agent's session later, unread",
+            )
+            return true
+          }
+          let timer: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([new Promise<void>((r) => (timer = setTimeout(r, Math.min(delay, left)))), stopped])
+          clearTimeout(timer)
+          if (stopReason) return false
+          delay = Math.min(delay * 2, 1000)
+          report = (await jobs.read(sessionID!).catch(() => undefined)) ?? { seq: 0, jobs: [] }
+          if (report.jobs.length) continue
+          // The report's execution may still be running (the hook runs before it ends).
+          if (!(await idle())) return false
+          report = (await jobs.read(sessionID!).catch(() => undefined)) ?? { seq: 0, jobs: [] }
+          if (!report.jobs.length) return true
+        }
+      }
+
       /** One prompt/wait turn. Returns a terminal outcome, or undefined when the turn succeeded. */
       const turn = async (text: string, onPrompted?: () => void): Promise<AgentOutcome | undefined> => {
         await ctx.session.prompt({ sessionID: sessionID!, text })
@@ -468,6 +523,7 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         mailbox?.open()
         const done = await Promise.race([ctx.session.wait({ sessionID: sessionID! }).then(() => "idle" as const), stopped])
         if (done !== "idle" || stopReason) return stoppedOutcome()
+        if (!(await awaitBackground())) return stoppedOutcome()
         if (!(await settleMessages())) return stoppedOutcome()
         const info = (await ctx.session.get({ sessionID: sessionID! })) as any
         usage = usageOf(info)
@@ -573,6 +629,9 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
           schema: !!schema,
           stopping: !!stopReason,
         })
+        // X31: from here the idle hook reports the child's background jobs.
+        await jobs.open(sessionID).catch(() => {})
+        jobsOpened = true
         const withHeld = (text: string) => (held.length ? `${text}\n\n${held.map(formatOrchestratorMessage).join("\n\n")}` : text)
         const reportHeld = () => {
           for (const m of held) mailbox?.report(m.id, "delivered")
@@ -640,10 +699,21 @@ export function createOpencodeRunner(ctx: RunnerContext, options: OpencodeRunner
         signal.removeEventListener("abort", onAbort)
         if (timer) clearTimeout(timer)
         if (sessionID && schema) await registry.unregister(sessionID).catch(() => {})
-        if (worktree) await cleanupWorktree(worktree)
+        // X31: a job still running (capped wait, stop) may write in the worktree: never remove it then.
+        let outstanding: BackgroundJob[] = []
+        if (sessionID && jobsOpened) {
+          outstanding = (await jobs.read(sessionID).catch(() => undefined))?.jobs ?? []
+          await jobs.close(sessionID).catch(() => {})
+        }
+        if (worktree) await cleanupWorktree(worktree, outstanding)
       }
 
-      async function cleanupWorktree(wt: { directory: string; projectID: string; head?: string }) {
+      async function cleanupWorktree(wt: { directory: string; projectID: string; head?: string }, running: BackgroundJob[]) {
+        if (running.length) {
+          warn(`kept worktree ${wt.directory}: ${describeJobs(running)} may still be using it`)
+          update({ worktree: wt.directory })
+          return
+        }
         let changed = true
         try {
           const status = await git(["status", "--porcelain"], wt.directory)

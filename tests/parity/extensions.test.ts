@@ -604,3 +604,29 @@ describe("X23 idle-hook schema nudge (opencode 2.3+)", () => {
     }
   })
 })
+
+describe("X31 background jobs (opencode 2.3+)", () => {
+  test("X31 real runner: agent() resolves to the reply after the agent's background subagent reported, not to 'I launched a subagent'", async () => {
+    let p!: Plugged
+    p = await h.setup({
+      real: true,
+      fake: {
+        respond: ({ turn, session, successor }) => {
+          if (turn === 0) {
+            const job = p.fake.startBackground(session.info.id, { description: "scan the repo" })
+            setTimeout(() => void p.fake.finishBackground(session.info.id, job, "<subagent>3 files</subagent>"), 40)
+            return { text: "I launched a subagent; I will report when it is done." }
+          }
+          return successor ? { text: "The repo has 3 relevant files." } : { text: "unexpected" }
+        },
+      },
+    })
+    const out = await p.call({ script: script(`return await agent("count the relevant files")`) })
+    expect(p.resultOf(await p.notification(0))).toBe("The repo has 3 relevant files.")
+    expect(p.fake.calls.prompt).toHaveLength(1)
+    await p.settled(out.runId!)
+    const rec = await h.store.readAgentRecord(out.runId!, 0)
+    expect(rec?.warnings ?? []).toEqual([])
+    expect([...p.fake.storage.keys()].filter((k) => k.startsWith("workflow-jobs/"))).toEqual([])
+  })
+})
