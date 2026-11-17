@@ -8,6 +8,24 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires opencode 2.3.0** (was 2.0.15). `@opencode/*` 2.3.0, `effect` 4.1.0 (the version
+  codemode 2.3.0 needs; older pins crash every run), and the TUI is built with OpenTUI 0.8.4 and
+  solid-js 1.9.17 (opencode 2.2+ refuses TUI plugins built for older OpenTUI). Use 0.2.x on 2.0.15.
+- Directory installs (`"plugins": ["file:///<repo>"]`) now load the built `dist/`: opencode 2.3
+  resolves a directory through its `package.json` `exports`. Run `npm run build` first. The root
+  `server.ts` and `tui.tsx` shims are gone.
+- Scripts run on codemode's new bytecode VM (much faster CPU-bound code). `this`, `bind`/`call`/`apply`,
+  `Object.freeze` and `WeakMap` now work; the authoring guide says so.
+
+### Security
+
+- Determinism guards (P15) could be bypassed on codemode 2.3.0, which added a global `require(name)`
+  and `import(name)` returning the native globals (`const r = require; r("Math").random()`). The
+  sandbox now hides `require` and rejects `import()` in the body syntax check. `crypto.randomUUID()`
+  and `crypto.getRandomValues()` (another source of nondeterminism, also on 2.0.15) now throw.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added

@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): a saved workflow in <project>/.opencode/workflows runs by name and
+// Live e2e (real opencode CLI): a saved workflow in <project>/.opencode/workflows runs by name and
 // as the /<name> command with the rest of the line as args (P53, P05). Enable with OPENCODE_E2E=1.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {

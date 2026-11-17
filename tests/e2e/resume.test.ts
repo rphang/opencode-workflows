@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): resume from the journal (P41), nothing-to-resume (P42), and
+// Live e2e (real opencode CLI): resume from the journal (P41), nothing-to-resume (P42), and
 // iterating on a script through scriptPath (P04). Enable with OPENCODE_E2E=1 (docs/E2E.md).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"

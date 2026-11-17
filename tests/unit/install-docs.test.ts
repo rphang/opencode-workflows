@@ -21,21 +21,42 @@ function walk(dir: string): string[] {
 }
 
 describe("plugin directory install", () => {
-  test("opencode's Host.resolve finds a server entry for the repo directory (plugins: [\"file:///<repo>\"])", async () => {
-    const entry = Host.resolve({ directory: ROOT } as never).server
-    expect(entry).toBeDefined()
-    const mod = (await import(String(entry))) as { default: unknown }
-    const direct = (await import(join(ROOT, "src", "index.ts"))) as { default: unknown }
-    expect(mod.default).toBe(direct.default)
+  // opencode 2.3+ resolves a directory whose package.json has `name` and `exports` through them, like
+  // the published package: `plugins: ["file:///<repo>"]` loads dist/, so a checkout must be built.
+  async function checkoutCopy(withDist: boolean): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "wf-dir-install-"))
+    writeFileSync(join(dir, "package.json"), readFileSync(join(ROOT, "package.json")))
+    if (withDist) {
+      mkdirSync(join(dir, "dist"))
+      writeFileSync(join(dir, "dist", "index.js"), "export default {}\n")
+      writeFileSync(join(dir, "dist", "tui.js"), "export default {}\n")
+    }
+    return dir
+  }
+
+  test("a built checkout resolves through package.json exports to dist/index.js and dist/tui.js", async () => {
+    const dir = await checkoutCopy(true)
+    try {
+      const entries = Host.resolve({ directory: dir } as never)
+      expect(String(entries.server).replaceAll("\\", "/")).toMatch(/\/dist\/index\.js$/)
+      expect(String(entries.tui).replaceAll("\\", "/")).toMatch(/\/dist\/tui\.js$/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("an unbuilt checkout resolves no entry (hence: npm run build first, documented in INSTALL.md)", async () => {
+    const dir = await checkoutCopy(false)
+    try {
+      expect(Host.resolve({ directory: dir } as never).server).toBeUndefined()
+      expect(readFileSync(join(ROOT, "docs", "INSTALL.md"), "utf8")).toMatch(/npm run build/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
 describe("TUI entry (live progress tree, X14)", () => {
-  test("Host.resolve finds the TUI entry of the repo directory (root tui.tsx)", () => {
-    const entries = Host.resolve({ directory: ROOT } as never)
-    expect(String(entries.tui)).toMatch(/tui\.tsx$/)
-  })
-
   test("the server entry never imports the TUI or its host modules (it loads without the TUI peers)", () => {
     const offenders = walk(join(ROOT, "src"))
       .filter((f) => !/[\\/]tui[\\/]/.test(f))
@@ -77,7 +98,7 @@ describe("README", () => {
     expect(readme).toContain("plugins/workflows.js")
     expect(readme).toContain('export { default } from "')
     expect(readme).toContain("file:///")
-    expect(readme).toContain("2.0.15")
+    expect(readme).toContain("2.3.0")
     expect(readme).toContain("--standalone")
     for (const cmd of ["/deep-research", "/workflows", "/workflow-authoring", "workflow_control", "ultracode"]) {
       expect(readme).toContain(cmd)

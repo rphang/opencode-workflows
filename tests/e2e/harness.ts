@@ -1,4 +1,4 @@
-// Live end-to-end harness: drives the real opencode 2.0.15 CLI against the plugin in an isolated
+// Live end-to-end harness: drives the real opencode CLI (pinned devDependency) against the plugin in an isolated
 // sandbox (.sandbox/e2e-*). See docs/E2E.md for the design and the findings.
 //
 // Shape of a live test:

@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): workflow_control `result` (X21), and what the parent model does with
+// Live e2e (real opencode CLI): workflow_control `result` (X21), and what the parent model does with
 // the notification's `<agent-failures>` (X20) and `<diagnostics>` (P79). `result` answers as soon as
 // the run has finished; there is no notification gate. Enable with OPENCODE_E2E=1 (docs/E2E.md); a
 // free parent model works: OPENCODE_E2E_MODEL=opencode/<free model> (OPENAI_API_KEY only has to be set).

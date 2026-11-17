@@ -160,11 +160,14 @@ Scripts run in opencode's codemode interpreter, a restricted JavaScript interpre
 - **Plain JavaScript, not TypeScript.** Type annotations, interfaces and generics fail to parse.
 - **No `import`, `import()` or `require`.** No filesystem, shell, network or Node API. Agents do that
   work, and the script only coordinates them.
-- **Not supported:** `class`, `this`, getters and setters, `globalThis`, `Object.freeze`.
+- **Not supported:** `class`, getters and setters, `new` on your own functions, `globalThis`.
+  (`this` in non-arrow functions, `bind`/`call`/`apply`, `Object.freeze` and `WeakMap` work since
+  opencode 2.3.0, but plain objects and closures read better.)
 - **Available:** async/await, closures, arrow functions, destructuring, spread, template literals,
   `Promise`, `Map`, `Set`, `JSON`, `Math`, `RegExp`, array methods, and `new Date(x)` with an
   argument.
-- **Deterministic:** `Date.now()`, `Math.random()` and a no-argument `new Date()` throw, because they
+- **Deterministic:** `Date.now()`, `Math.random()`, `crypto.randomUUID()`/`getRandomValues()` and a
+  no-argument `new Date()` throw, because they
   would break resume. Pass timestamps in through `args`, and vary prompts by index instead of
   randomness.
 

@@ -3,7 +3,7 @@
 This page covers every install method in detail. For the short version, see the
 [README](../README.md#install).
 
-Requirements: **opencode 2.0.15** (the version the plugin is pinned to). opencode installs npm
+Requirements: **opencode 2.3.0** (the version the plugin is pinned to; use the 0.2.x releases on 2.0.15). opencode installs npm
 plugins itself, so you don't need Node, Bun or npm for the npm install. `git` is needed only for
 `isolation: 'worktree'` agents.
 
@@ -178,11 +178,13 @@ worktree reason explained above.
 }
 ```
 
-A plain absolute directory path works too. Point at the **repo directory**: opencode resolves it
-through the root `server.ts`, which re-exports `src/index.ts`. A file path such as
-`.../src/index.ts` fails with `configured plugin path must be a directory`. This form accepts
-options: `{ "package": "file:///absolute/path/to/opencode-workflows", "options": { ... } }`.
-`server.ts` is not in the npm package, so this only works from a git checkout.
+A plain absolute directory path works too. Point at the **repo directory** and **run `npm run build`
+first** (and again after every change): since opencode 2.3.0 a directory whose `package.json` has a
+`name` and `exports` resolves through them, exactly like the published package, so it loads
+`dist/index.js` and `dist/tui.js`. An unbuilt checkout loads nothing, without an error. To run
+`src/` without a build, use the loader file above pointing at `src/index.ts` (server part only).
+A file path such as `.../src/index.ts` fails with `configured plugin path must be a directory`.
+This form accepts options: `{ "package": "file:///absolute/path/to/opencode-workflows", "options": { ... } }`.
 
 ### The TUI part (live progress tree)
 
@@ -193,7 +195,7 @@ or `<directory>/tui`), and the TUI loads it for every active server plugin that 
 | Install | TUI entry | Live tree |
 |---|---|---|
 | npm package (`plugins` entry or `opencode plugin add`) | `exports["./tui"]` → `dist/tui.js`, precompiled | yes (verified live on 2.0.15) |
-| Directory entry (`file:///…/opencode-workflows`) | the repo's `tui.tsx`, which the TUI compiles itself | yes |
+| Directory entry (`file:///…/opencode-workflows`) | the same `exports["./tui"]` → `dist/tui.js` (build first) | yes |
 | Loader file (`plugins/workflows.js`) | none: a single file only has a server entry | no; `/workflows` still works |
 
 `dist/tui.js` imports `solid-js`, `@opentui/*` and `@opencode/plugin/tui` without bundling them: the

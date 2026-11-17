@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): steering a running workflow agent (PARITY X01, X03, X06).
+// Live e2e (real opencode CLI): steering a running workflow agent (PARITY X01, X03, X06).
 // Enable with OPENCODE_E2E=1 (docs/E2E.md).
 //
 // The test project gets a second plugin with a `slow_step` tool (3 s per call, logged to a file), so

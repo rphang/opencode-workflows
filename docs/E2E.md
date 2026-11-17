@@ -1,6 +1,6 @@
-# Live end-to-end tests (opencode 2.0.15)
+# Live end-to-end tests
 
-`tests/e2e/` drives the **real** opencode 2.0.15 CLI against the plugin, with real model calls.
+`tests/e2e/` drives the **real** opencode CLI (the pinned `@opencode/cli` devDependency) against the plugin, with real model calls.
 These tests are opt-in: they cost money (about $0.20 per full run) and take about 2 minutes.
 
 ```sh
@@ -153,8 +153,8 @@ Enter opened the child in a new tab whose footer still tracks the parent run, `x
 `STEERED-OK`, and the finish toast appeared (conhost: `focus_unknown`).
 
 The README screenshots (`docs/assets/live-tree-*.png`) were retaken for the per-agent model display
-(X18, X19) with a shorter setup: a directory install (`"plugins":["file:///<repo>"]`, which loads the
-repo's `server.ts` and `tui.tsx`; run `npm run build` first) instead of verdaccio, a project in a
+(X18, X19) on 2.0.15 with a shorter setup: a directory install (`"plugins":["file:///<repo>"]`;
+run `npm run build` first, since opencode 2.3+ loads a directory's `dist/` through `exports`) instead of verdaccio, a project in a
 short path outside the repo, and free `opencode/*` models so that the agents show several models:
 parent `opencode/space-bunny-free`, one agent with `effort:'low'` (`…#low`), one with
 `model:'opencode/nemotron-3-ultra-free'`, and a second phase whose `meta.phases` label and agent use

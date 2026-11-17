@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { BODY_LINE_OFFSET, buildProgram, executeProgram, type ExecuteResult } from "../../src/sandbox.ts"
+import { BODY_LINE_OFFSET, buildProgram, checkBodySyntax, executeProgram, type ExecuteResult } from "../../src/sandbox.ts"
 import { PRELUDE } from "../../src/prelude.ts"
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -146,6 +146,18 @@ describe("sandbox isolation (P16)", () => {
       expect(ok(await run(`return typeof ${name}`))).toBe("undefined")
     })
   }
+  test("import() is rejected by the syntax check, with its body-relative position", () => {
+    const r = checkBodySyntax('const x = 1\nconst m = await import("Math")')
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.error).toMatch(/import\(\) is not available in workflow scripts/)
+      expect(r.line).toBe(2)
+    }
+  })
+  test("import() fails the run without executing anything", async () => {
+    const r = err(await run('return (await import("Math")).default.random()'))
+    expect(r.error).toMatch(/import\(\) is not available/)
+  })
   test("Function constructor escape does not reach host", async () => {
     const r = await run("try { return typeof (() => 1).constructor('return process')() } catch (e) { return 'blocked' }")
     expect(r.ok ? r.value : "blocked").not.toBe("object")

@@ -1,4 +1,4 @@
-// Live e2e (opencode 2.0.15): a workflow agent cannot launch or manage workflows (P60).
+// Live e2e (real opencode CLI): a workflow agent cannot launch or manage workflows (P60).
 // Enable with OPENCODE_E2E=1 (docs/E2E.md).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"

@@ -1,9 +1,57 @@
-# opencode 2.0.15 plugin API: verified facts for the workflow runner
+# opencode plugin API: verified facts for the workflow runner
 
-Everything below was observed live on opencode **2.0.15** (`npx opencode2 run --standalone`) using
+The sections after the first were observed live on opencode **2.0.15** (`npx opencode2 run --standalone`) using
 the throwaway plugins in `tests/e2e/spikes/` (`explore.js`, `runner-live.ts`), unless it is marked
 *(source)*, which means it was read from the v2 branch of `anomalyco/opencode` (`packages/core/src`).
-The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes.
+The fake in `tests/helpers/fake-opencode-ctx.ts` mirrors these shapes. The first section lists what
+changed in **2.3.0** (the current pin).
+
+## Changes in 2.3.0 *(source; not yet re-verified live)*
+
+Read from the `v2.0.15..v2.3.0` tags of `anomalyco/opencode`; the unit and parity suites pass against
+the 2.3.0 packages and `tsc` is clean against their types.
+
+- **Every `ctx.*` call the plugin makes keeps its 2.0.15 shape** (session, tool, permission, agent,
+  model, worktree, storage, rpc, event, command). Type-only changes: `session.wait` moved to
+  `ExperimentalSessionApi` (still on `ctx.session`; the client marks the old path "removed in the
+  next minor"), `interrupt` now types `resume`, `event.subscribe` takes `{types?, signal?, onActivity?}`
+  (#58864), `model.list` returns chat models only by default.
+- **Dependencies:** `@opencode/plugin` and `@opencode/codemode` 2.3.0 depend on `effect` 4.1.0;
+  codemode 2.3.0 with an older `effect` crashes every run (`fiber.succeedWith is not a function`).
+  TUI plugins need OpenTUI 0.8 (`@opentui/*` >= 0.8.4 peer; older pins fail to install).
+- **codemode** replaced its interpreter with a bytecode VM (#62642, #63377; 5–90× faster). It adds
+  `this`, `bind`/`call`/`apply`, `Object.freeze`/`create`, `structuredClone`, `WeakMap`/`WeakSet`, and
+  a global **`require(name)` / `import(name)` that return native globals** (#61151): `require("Math")`
+  is the native Math, which bypassed the P15 guards until the sandbox hid `require` and rejected
+  `import()`. Host functions still cannot receive functions. A global may return an Effect, which
+  codemode interrupts on timeout/abort (#59948).
+- **`session.create({parentID})`** is forwarded (#52359), but `parentID` and `location` are
+  mutually exclusive (a child is forced into its parent's location), and every `parentID` child
+  posts a `<subagent>` report with its last reply into the parent's inbox (steer) after **every**
+  completed round and wakes the parent (#63209; the opt-out was removed in #63413). The runner
+  therefore keeps creating root sessions (and P63 stays). Upstream's own `subagent` tool is now
+  always background (#63391).
+- **Failure text:** the `{type:"idle", outcome:"failed"}` context message carries
+  `error: {type, message, status?}` (#53826). An interrupted step keeps its closed text and its
+  assistant message gets `error: {type:"aborted", message:"Step interrupted"}` (#60674). Tokens of an
+  interrupted step are still not counted.
+- **`experimental.idle` session hook:** runs when a session finishes model work with nothing pending,
+  before it goes idle; input admitted from it (e.g. `synthetic`) continues the same execution
+  (`core/session/runner/llm.ts`; `/goal` uses it). On 2.0.15 registering the name succeeds and never fires.
+- **Location eviction:** `LocationActivity` no longer evicts a location with an active execution or
+  background job (#57416); `experimental.location_idle_timeout` overrides the 60-minute timeout.
+- **`ctx.permission.assert({sessionID, action, resources, ...})`** asks through the native prompt and
+  honours saved approvals (#54930). Evaluation order is unchanged.
+- **`ctx.vcs.status` still ignores the location**; keep the git shell-out.
+- **Freeform tool input** (#61703): `freeform: {type:"text"}` on a tool whose input schema has exactly
+  one property (a required string) lets models whose models.dev capabilities list it send raw text.
+- **Plugin resolution:** a local directory whose `package.json` has `name` and `exports` resolves
+  through them like the published package (#55246), so a checkout must be built; `rpc.call` no
+  longer waits for plugins to load (#62796), so a TUI's first call can fail with `rpc.unavailable`.
+- **TUI:** keymap layers can be registered at setup (#53010); `dialog.select` takes `search` and
+  footer `actions` (#53009); a `sidebar.content` slot `{sessionID}`; a slot rendering a bare string
+  throws. OpenTUI 0.8 still JSX-compiles only files outside `node_modules`, so `dist/tui.js` stays
+  precompiled. GUI (desktop/web app) plugins are new and experimental (`./gui-experimental` export).
 
 ## Session API (`ctx.session`)
 
@@ -302,8 +350,9 @@ submit), and `retry` all behaved as specified.
 
 - A config entry `"plugins": ["file:///<dir>"]` (or a plain directory path, or
   `{"package": "file:///<dir>", "options": {...}}`) is resolved by `Host.resolve({directory})`
-  (`@opencode/plugin/dist/host.js`), which tries `<dir>/server` then `<dir>/index` and **ignores
-  package.json `main`/`exports`** *(source)*. Hence the repo's root `server.ts`. **Verified live**
+  (`@opencode/plugin/dist/host.js`). On 2.0.15 it tried `<dir>/server` then `<dir>/index` and
+  **ignored package.json `main`/`exports`** *(source)*, hence the root `server.ts` of 0.2.x; since
+  2.3.0 it follows `exports` (see the first section), so the checkout must be built. **Verified live** on 2.0.15
   (`.sandbox/review/probe-install2.ts`, `opencode serve`): both directory forms load the plugin, and
   `options: {disabled: true}` reaches `setup` (plugin active, no workflow commands).
 - A file target (`.../src/index.ts`) is rejected with `configured plugin path must be a directory`;

@@ -154,11 +154,11 @@ outside the project) is denied, so put everything they need in the prompt.
 - Plain JavaScript, NOT TypeScript: type annotations (\`: string[]\`), interfaces and generics fail to parse.
 - No \`import\`, \`import()\` or \`require\`; no filesystem, shell, network or Node API. Agents do that
   work; the script only coordinates them.
-- Not supported by the interpreter: \`class\` declarations, \`this\`, getter/setter accessors,
-  \`globalThis\`, \`Object.freeze\`. Use plain objects, closures and arrow functions.
+- Not supported by the interpreter: \`class\` declarations, getter/setter accessors, \`new\` on your
+  own functions, \`globalThis\`. Use plain objects, closures and arrow functions.
 - Available: async/await, closures, destructuring, spread, Promise, Map, Set, JSON, Math, RegExp,
   Array methods, \`new Date(x)\` with an argument.
-- **Determinism**: \`Date.now()\`, \`Math.random()\` and a no-argument \`new Date()\` throw — they would
+- **Determinism**: \`Date.now()\`, \`Math.random()\`, \`crypto.randomUUID()\` and a no-argument \`new Date()\` throw — they would
   break resume. Pass timestamps in through \`args\`, stamp results after the workflow returns, and
   vary prompts or labels by index instead of randomness.
 
@@ -335,6 +335,6 @@ API:
 - pipeline(items, ...stages) → per-item stages, no barrier; stages get (prev, item, index); a throwing stage yields null. The default for multi-stage work.
 - parallel(thunks) → barrier; never rejects, failed thunks yield null.
 - phase(title), log(message), budget {total, spent(), remaining()}, workflow(nameOrRef, args?) (one nesting level).
-Always .filter(Boolean) results. Limits: 4096 items per parallel/pipeline call, 1000 agents per run, concurrency min(16, CPUs-2). No import/require, filesystem or network in the script; no class, this, getters or globalThis. Date.now(), Math.random() and new Date() without arguments throw (they break resume) — pass timestamps via args.
+Always .filter(Boolean) results. Limits: 4096 items per parallel/pipeline call, 1000 agents per run, concurrency min(16, CPUs-2). No import/require, filesystem or network in the script; no class, getters or globalThis. Date.now(), Math.random(), crypto.randomUUID() and new Date() without arguments throw (they break resume) — pass timestamps via args.
 
 Load the full reference with /workflow-authoring before writing a non-trivial script.`

@@ -1,4 +1,4 @@
-// opencode permission rules as seen by the plugin: evaluation mirrors opencode 2.0.15
+// opencode permission rules as seen by the plugin: evaluation mirrors opencode 2.0.15–2.3.0 (unchanged)
 // (core/src/permission.ts `evaluate`: rulesets are flattened, the LAST matching rule wins, no match
 // means "ask"; core/src/util/wildcard.ts `match`). A session's effective rules are its agent's rules
 // followed by the session's own `permissions` (docs/OPENCODE-API-NOTES.md "Permissions").

@@ -7,7 +7,7 @@ script runs in the background, and its result comes back to your session when it
 [![CI](https://github.com/rphang/opencode-workflows/actions/workflows/ci.yml/badge.svg)](https://github.com/rphang/opencode-workflows/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@rphang/opencode-workflows)](https://www.npmjs.com/package/@rphang/opencode-workflows)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![opencode 2.0.15](https://img.shields.io/badge/opencode-2.0.15-black)](#requirements)
+[![opencode 2.3.0](https://img.shields.io/badge/opencode-2.3.0-black)](#requirements)
 
 ```sh
 opencode plugin add @rphang/opencode-workflows
@@ -113,11 +113,12 @@ run (6 agents, under a minute) is in [`demo/DEMO-OUTPUT.md`](demo/DEMO-OUTPUT.md
 
 ## Requirements
 
-- **opencode 2.0.15.** The plugin is pinned to this exact version (`engines.opencode`, and the
-  `@opencode/*` dependencies are 2.0.15). Other 2.x versions are untested. opencode v1 is not
-  supported, because the plugin uses the v2 plugin API. Check your version with
-  `opencode --version`, which should print `opencode v2.0.15`. One way to install or pin that
-  version is the npm package: `npm install -g @opencode/cli@2.0.15` (this needs Node.js and npm).
+- **opencode 2.3.0.** The plugin is pinned to this exact version (`engines.opencode`, and the
+  `@opencode/*` dependencies are 2.3.0). Other 2.x versions are untested; 2.2.x and older will not
+  load the TUI part (it needs OpenTUI 0.8). For opencode 2.0.15 use the plugin's 0.2.x releases.
+  opencode v1 is not supported, because the plugin uses the v2 plugin API. Check your version with
+  `opencode --version`, which should print `opencode v2.3.0`. One way to install or pin that
+  version is the npm package: `npm install -g @opencode/cli@2.3.0` (this needs Node.js and npm).
   See [opencode's docs](https://opencode.ai/docs) for other install methods.
 - **Nothing else for the plugin.** opencode downloads and installs npm plugins itself, so the
   plugin needs no Node, Bun or npm of its own (your opencode install method might).
@@ -200,7 +201,7 @@ export { default } from "/absolute/path/to/opencode-workflows/dist/index.js"
 ```
 
 or point the config at the checkout directory: `"plugins": ["file:///absolute/path/to/opencode-workflows"]`.
-Both were tested on opencode 2.0.15. Details, including a no-build loader for `src/index.ts`:
+Both load the built `dist/` (run `npm run build` first). Details, including a no-build loader for `src/index.ts`:
 [docs/INSTALL.md](docs/INSTALL.md#from-source).
 
 Use **one** install method only. If the plugin is loaded twice (for example the npm package plus a
@@ -406,7 +407,7 @@ not report focus (Windows conhost), you get an in-app toast. Terminals that repo
 Windows Terminal, iTerm2 and kitty.
 
 The tree ships with the npm package (`dist/tui.js`) and with directory installs
-(`"plugins": ["file:///…/opencode-workflows"]`, through the repo's `tui.tsx`). A single-file
+(`"plugins": ["file:///…/opencode-workflows"]`, which loads the built `dist/tui.js`). A single-file
 loader (`plugins/workflows.js`) loads only the server part: the tree is not available there, but
 `/workflows` and `/workflows msg` work everywhere, including the web UI.
 
@@ -654,7 +655,7 @@ whatever model you pick. It has not been tested with Copilot, though. Every agen
 requests, so providers that bill or rate-limit per request will feel a large fan-out.
 
 **Does it work with opencode v1?**
-No. It needs the opencode v2 plugin API and is pinned to 2.0.15.
+No. It needs the opencode v2 plugin API and is pinned to 2.3.0.
 
 **Do I need Claude Code or an Anthropic account?**
 No. This is an independent reimplementation for opencode, and it runs on any provider opencode
