@@ -20,6 +20,7 @@
       "import": "./dist/tui.js",
       "default": "./dist/tui.js"
     },
+    "./gui-experimental": "./dist/gui-experimental.cjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -73,7 +74,9 @@
     "@types/node": "^26.6.2",
     "bun": "^1.4.2",
     "solid-js": "1.9.17",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "7.3.7",
+    "vite-plugin-solid": "2.11.10"
   },
   "dependencies": {
     "@opencode/codemode": "2.3.0",
